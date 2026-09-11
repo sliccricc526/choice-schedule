@@ -48,23 +48,31 @@ create table if not exists public.day_overrides (
   created_at timestamptz not null default now()
 );
 
--- Row Level Security: open to anyone holding the anon key (internal-tool mode).
--- To restrict to logged-in users later, change `using (true)` to
--- `using (auth.role() = 'authenticated')` on each policy and enable
--- Supabase Auth in the app.
+-- Row Level Security: signed-in users only.
+--
+-- `to authenticated` is what actually protects the data. The anon key ships
+-- inside the public JavaScript bundle by design, so a policy granted to the
+-- `public` role lets anyone who opens the page read and write every table
+-- straight through the REST API — the sign-in screen would just be decoration.
+-- Granting to `authenticated` means a request has to carry a real session
+-- token, which only a successful sign-in produces.
+--
+-- Accounts are created in the Supabase dashboard (Authentication -> Users ->
+-- Add user, with Auto Confirm on). Leave public signups disabled so nobody can
+-- enrol themselves.
 alter table public.jobs enable row level security;
 alter table public.station_caps enable row level security;
 alter table public.day_overrides enable row level security;
 alter table public.part_numbers enable row level security;
 
-create policy "jobs open access" on public.jobs
-  for all using (true) with check (true);
-create policy "caps open access" on public.station_caps
-  for all using (true) with check (true);
-create policy "days open access" on public.day_overrides
-  for all using (true) with check (true);
-create policy "parts open access" on public.part_numbers
-  for all using (true) with check (true);
+create policy "jobs team access" on public.jobs
+  for all to authenticated using (true) with check (true);
+create policy "caps team access" on public.station_caps
+  for all to authenticated using (true) with check (true);
+create policy "days team access" on public.day_overrides
+  for all to authenticated using (true) with check (true);
+create policy "parts team access" on public.part_numbers
+  for all to authenticated using (true) with check (true);
 
 -- Live sync between users: publish changes over realtime.
 alter publication supabase_realtime add table public.jobs;

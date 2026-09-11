@@ -27,6 +27,8 @@ export default function App() {
   const [status, setStatus] = useState(configured ? 'loading' : 'unconfigured')
   const [error, setError] = useState('')
   const [bootErrors, setBootErrors] = useState([])
+  // undefined while we're still asking Supabase, null when signed out.
+  const [session, setSession] = useState(undefined)
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -66,23 +68,40 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!supabase) return setSession(null)
+    supabase.auth.getSession().then(({ data }) => setSession(data.session || null))
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+      setSession(s || null)
+      // A fresh sign-in starts a fresh load; a sign-out drops what was on screen.
+      setStatus(s ? 'loading' : 'ready')
+      if (!s) { setJobs([]); setParts([]); setDayOverrides(new Map()) }
+    })
+    return () => sub.subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
     const onErr = (e) => setBootErrors((b) => [...b, String(e.reason?.message || e.message || e.reason || e.error || 'unknown error')])
     window.addEventListener('error', onErr)
     window.addEventListener('unhandledrejection', onErr)
+    return () => {
+      window.removeEventListener('error', onErr)
+      window.removeEventListener('unhandledrejection', onErr)
+    }
+  }, [])
+
+  // Only watch for a stalled load while there's a session actually loading.
+  useEffect(() => {
+    if (!session || status !== 'loading') return
     const watchdog = setTimeout(() => {
       setStatus((s) => (s === 'loading' ? 'error' : s))
       setError((prev) => prev || 'Loading stalled after 10 seconds without a reported cause. The messages below (if any) are the underlying errors.')
     }, 10000)
-    return () => {
-      window.removeEventListener('error', onErr)
-      window.removeEventListener('unhandledrejection', onErr)
-      clearTimeout(watchdog)
-    }
-  }, [])
+    return () => clearTimeout(watchdog)
+  }, [session, status])
 
   useEffect(() => {
+    if (!supabase || !session) return
     load()
-    if (!supabase) return
     // Live sync: any change from any user refreshes every open board.
     const ch = supabase
       .channel('schedule-sync')
@@ -92,7 +111,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, load)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-  }, [load])
+  }, [load, session])
 
   const saveJob = async (id, patch) => {
     setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)))
@@ -249,6 +268,8 @@ export default function App() {
       <div className="notice">Supabase isn't connected yet. Copy <code>.env.example</code> to <code>.env</code>, add your project URL and anon key, and restart. On Vercel, set the same two values as environment variables.</div>
     </div>
   )
+  if (session === undefined) return <div className="shell"><Style /><div className="notice">Checking your sign-in…</div></div>
+  if (session === null) return <SignIn />
   if (status === 'loading') return <div className="shell"><Style /><div className="notice">Loading the schedule…</div></div>
   if (status === 'error') return (
     <div className="shell"><Style />
@@ -276,6 +297,10 @@ export default function App() {
           {(daysOff || daysOn) ? (
             <div><b>{daysOff}</b> closed{daysOn ? <> · <b>{daysOn}</b> extra</> : null}</div>
           ) : null}
+          <div className="who">
+            {session.user.email}
+            <button className="btn sm" onClick={() => supabase.auth.signOut()}>Sign out</button>
+          </div>
         </div>
       </div>
 
@@ -419,6 +444,45 @@ export default function App() {
   )
 }
 
+function SignIn() {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  const submit = async (e) => {
+    e.preventDefault()
+    setBusy(true)
+    setErr('')
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+    // On success the auth listener swaps this screen for the board.
+    if (error) { setErr(error.message); setBusy(false) }
+  }
+
+  return (
+    <div className="shell center">
+      <Style />
+      <form className="loginbox" onSubmit={submit}>
+        <h1>Choice Trailers</h1>
+        <p className="sub">Shop schedule — sign in to continue.</p>
+        <label>Email
+          <input type="email" autoComplete="username" required autoFocus
+            value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label>Password
+          <input type="password" autoComplete="current-password" required
+            value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        {err && <div className="loginerr">{err}</div>}
+        <button className="btn primary" type="submit" disabled={busy}>
+          {busy ? 'Signing in…' : 'Sign in'}
+        </button>
+        <p className="sub small">Need an account, or forgotten your password? Ask whoever set up the board.</p>
+      </form>
+    </div>
+  )
+}
+
 function Row({ j, days, dayIndex, todayT, cal, pn, selected, onSelect }) {
   return (
     <>
@@ -477,6 +541,19 @@ function Style() {
     * { box-sizing: border-box; }
     body { margin: 0; font-family: 'Archivo', 'Segoe UI', sans-serif; background: #EEF0F1; color: #1B2126; }
     .shell { min-height: 100vh; }
+    .shell.center { display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .loginbox { background: #FFF; border: 1px solid #D4D9DC; border-radius: 8px; padding: 26px 26px 20px; width: 100%; max-width: 360px; box-shadow: 0 1px 3px rgba(27,33,38,.06); }
+    .loginbox h1 { margin: 0; font-size: 19px; font-weight: 700; }
+    .loginbox .sub { margin: 5px 0 18px; font-size: 13px; color: #5B6670; }
+    .loginbox .sub.small { margin: 14px 0 0; font-size: 11px; line-height: 1.5; }
+    .loginbox label { display: block; font-size: 12px; font-weight: 600; color: #3A434B; margin-bottom: 12px; }
+    .loginbox input { display: block; width: 100%; margin-top: 5px; font-family: inherit; font-size: 14px; padding: 9px 10px; border: 1px solid #C6CDD1; border-radius: 4px; }
+    .loginbox input:focus { outline: 2px solid #44688F; outline-offset: -1px; border-color: #44688F; }
+    .loginerr { font-size: 12px; background: #F8E7E5; color: #7C221B; border-radius: 4px; padding: 8px 10px; margin-bottom: 12px; line-height: 1.4; }
+    .btn.primary { background: #1B2126; color: #FFF; border-color: #1B2126; width: 100%; padding: 9px 14px; }
+    .btn.primary:hover { background: #333C44; }
+    .btn.primary:disabled { opacity: .6; cursor: default; }
+    .who { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #5B6670; padding-left: 12px; border-left: 1px solid #C6CDD1; }
     .notice { margin: 24px; padding: 14px 16px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; font-size: 14px; max-width: 640px; line-height: 1.5; }
     .notice.bad { background: #F8E7E5; border-color: #DCB4B0; color: #7C221B; }
     .notice code { background: #EEF0F1; padding: 1px 5px; border-radius: 3px; }
