@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar existed, run just the `day_overrides` block from `supabase/schema.sql` against your database — the rest is already there. Without that table the board still works; it shows a note where the day toggles would be.
+If you set this up before the shop calendar or the part-number catalog existed, run just the `day_overrides` and `part_numbers` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 ### 2. Local dev
 ```bash
@@ -29,6 +29,12 @@ npm run dev
 2. Vercel dashboard → Add New → Project → import the repo (Vite is auto-detected).
 3. Add two environment variables: `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 4. Deploy. Share the URL with the shop.
+
+## Part numbers
+
+A part number is the standard build for a trailer model — a description plus working days for fabrication, paint and final assembly. **Edit part numbers** under the board opens the catalog; **Add unit** lets you start a new build from one instead of from blanks.
+
+Selecting a part number **copies** its values onto that unit rather than linking them. Editing a part number later therefore never reschedules trailers already in the shop — a deliberate choice, since a routing change shouldn't silently move work that's underway. Each unit keeps a reference to the part number it came from, so the board tags the row and the unit panel offers **Reset to standard** whenever a unit's numbers have been tuned away from the catalog's.
 
 ## Access control
 
