@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
-  OPS, strip, addDays, daysBetween, isWorkday, scheduleJob, levelSchedule, isoDate, parseDate,
+  OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
+  isoDate, parseDate,
 } from './engine.js'
 
 const COL = 26
@@ -11,6 +12,10 @@ export default function App() {
   const today = useMemo(() => strip(new Date()), [])
   const [jobs, setJobs] = useState([])
   const [caps, setCaps] = useState({ fab: 2, paint: 1, asm: 2 })
+  // ISO date -> whether the shop works that day, overriding the Mon–Fri default.
+  const [dayOverrides, setDayOverrides] = useState(() => new Map())
+  // False when the day_overrides table isn't there yet, so the board still works.
+  const [calendarEnabled, setCalendarEnabled] = useState(true)
   const [leveled, setLeveled] = useState(true)
   const [selected, setSelected] = useState(null)
   const [status, setStatus] = useState(configured ? 'loading' : 'unconfigured')
@@ -20,9 +25,10 @@ export default function App() {
   const load = useCallback(async () => {
     if (!supabase) return
     try {
-      const [jr, cr] = await Promise.all([
+      const [jr, cr, dr] = await Promise.all([
         supabase.from('jobs').select('*').order('delivery_date'),
         supabase.from('station_caps').select('*'),
+        supabase.from('day_overrides').select('*'),
       ])
       if (jr.error || cr.error) {
         setStatus('error')
@@ -37,6 +43,10 @@ export default function App() {
       const c = { fab: 2, paint: 1, asm: 2 }
       ;(cr.data || []).forEach((r) => { c[r.station] = r.cap })
       setCaps(c)
+      // The calendar is optional: if the table hasn't been created yet, fall back
+      // to plain weekends rather than failing the whole board.
+      setCalendarEnabled(!dr.error)
+      setDayOverrides(dr.error ? new Map() : new Map((dr.data || []).map((r) => [r.day, r.working])))
       setStatus('ready')
     } catch (err) {
       setStatus('error')
@@ -67,6 +77,7 @@ export default function App() {
       .channel('schedule-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, load)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'station_caps' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'day_overrides' }, load)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [load])
@@ -98,16 +109,43 @@ export default function App() {
     if (e) setError(e.message)
     load()
   }
+  // Click a date to close the shop that day (holiday, shutdown) or to open a
+  // weekend for overtime. A day back at its Mon–Fri default drops its row.
+  const toggleDay = async (d) => {
+    if (!calendarEnabled) return
+    const iso = isoDate(d)
+    const working = !cal.isWorkday(d)
+    const isDefault = working === !isWeekend(d)
+    setDayOverrides((m) => {
+      const n = new Map(m)
+      if (isDefault) n.delete(iso); else n.set(iso, working)
+      return n
+    })
+    const { error: e } = isDefault
+      ? await supabase.from('day_overrides').delete().eq('day', iso)
+      : await supabase.from('day_overrides').upsert({ day: iso, working })
+    if (e) { setError(e.message); load() }
+  }
   const saveCap = async (station, cap) => {
     setCaps((c) => ({ ...c, [station]: cap }))
     const { error: e } = await supabase.from('station_caps').upsert({ station, cap })
     if (e) { setError(e.message); load() }
   }
 
-  const scheduled = useMemo(() => {
-    const list = leveled ? levelSchedule(jobs, caps, today) : jobs.map((j) => scheduleJob(j, today))
-    return list.sort((a, b) => a.mustStart - b.mustStart)
-  }, [jobs, caps, leveled, today])
+  const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
+
+  const { scheduled, scheduleError } = useMemo(() => {
+    try {
+      const list = leveled
+        ? levelSchedule(jobs, caps, today, cal)
+        : jobs.map((j) => scheduleJob(j, today, cal))
+      return { scheduled: list.sort((a, b) => a.mustStart - b.mustStart), scheduleError: '' }
+    } catch (err) {
+      // A calendar with nearly everything switched off leaves the scheduler with
+      // nowhere to put the work; say so instead of showing a half-built board.
+      return { scheduled: [], scheduleError: String((err && err.message) || err) }
+    }
+  }, [jobs, caps, leveled, today, cal])
 
   const { days, months } = useMemo(() => {
     let min = today, max = addDays(today, 14)
@@ -138,13 +176,15 @@ export default function App() {
     scheduled.forEach((j) => OPS.forEach((o) => {
       const s = j.spans[o.key]
       for (let d = strip(s.start); d <= s.end; d = addDays(d, 1))
-        if (isWorkday(d)) out[o.key][daysBetween(days[0], d)]++
+        if (cal.isWorkday(d)) out[o.key][daysBetween(days[0], d)]++
     }))
     return out
-  }, [scheduled, days])
+  }, [scheduled, days, cal])
 
   const overDays = OPS.reduce(
-    (n, o) => n + loads[o.key].filter((c, i) => isWorkday(days[i]) && c > caps[o.key]).length, 0)
+    (n, o) => n + loads[o.key].filter((c, i) => cal.isWorkday(days[i]) && c > caps[o.key]).length, 0)
+  const daysOff = days.filter((d) => cal.isOverridden(d) && !cal.isWorkday(d)).length
+  const daysOn = days.filter((d) => cal.isOverridden(d) && cal.isWorkday(d)).length
   const atRisk = scheduled.filter((j) => j.late).length
   const sel = scheduled.find((j) => j.id === selected)
   const todayT = today.getTime()
@@ -178,6 +218,9 @@ export default function App() {
           <div><b>{scheduled.length}</b> units in plan</div>
           <div className={atRisk ? 'bad' : ''}><b>{atRisk}</b> {leveled ? 'projected late' : 'behind required start'}</div>
           <div className={overDays ? 'bad' : ''}><b>{overDays}</b> overloaded station-days</div>
+          {(daysOff || daysOn) ? (
+            <div><b>{daysOff}</b> closed{daysOn ? <> · <b>{daysOn}</b> extra</> : null}</div>
+          ) : null}
         </div>
       </div>
 
@@ -185,6 +228,10 @@ export default function App() {
         {OPS.map((o) => <div key={o.key}><span className="chip" style={{ background: o.color }} />{o.label}</div>)}
         <div><span className="chip todaychip" />Today</div>
         <div>▼ Delivery</div>
+        <div><span className="chip offchip" />Shop closed</div>
+        {calendarEnabled
+          ? <div className="hint">Click any date to close or open that day</div>
+          : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
       </div>
 
       <div className="boardwrap">
@@ -192,12 +239,22 @@ export default function App() {
           <div className="corner" />
           {months.map((m, i) => <div key={i} className="month" style={{ gridColumn: `span ${m.count}` }}>{m.label}</div>)}
           <div className="corner" />
-          {days.map((d, i) => (
-            <div key={i} className={`dayhead ${!isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'today' : ''}`}>{d.getDate()}</div>
-          ))}
+          {days.map((d, i) => {
+            const off = !cal.isWorkday(d), set = cal.isOverridden(d)
+            return (
+              <div key={i}
+                className={`dayhead ${off ? 'we' : ''} ${set ? 'ovr' : ''} ${d.getTime() === todayT ? 'today' : ''} ${calendarEnabled ? 'clickable' : ''}`}
+                onClick={() => toggleDay(d)}
+                title={calendarEnabled
+                  ? `${fmt(d)} — ${off ? 'closed' : 'working'}${set ? ' (set by hand)' : ''}. Click to ${off ? 'open' : 'close'}.`
+                  : undefined}>
+                {d.getDate()}
+              </div>
+            )
+          })}
 
           {scheduled.map((j) => (
-            <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT}
+            <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
               selected={selected === j.id}
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
@@ -205,7 +262,7 @@ export default function App() {
           <div className="secthead">Station load — units per day</div>
           <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
           {OPS.map((o) => (
-            <LoadRow key={o.key} op={o} counts={loads[o.key]} cap={caps[o.key]} days={days} todayT={todayT}
+            <LoadRow key={o.key} op={o} counts={loads[o.key]} cap={caps[o.key]} days={days} todayT={todayT} cal={cal}
               onCap={(v) => saveCap(o.key, v)} />
           ))}
         </div>
@@ -243,12 +300,13 @@ export default function App() {
       ) : (
         <div className="addrow"><button className="btn" onClick={addJob}>Add unit</button></div>
       )}
+      {scheduleError && <div className="notice bad">Couldn't build the schedule: {scheduleError}</div>}
       {error && status === 'ready' && <div className="notice bad">Last change didn't save: {error}</div>}
     </div>
   )
 }
 
-function Row({ j, days, dayIndex, todayT, selected, onSelect }) {
+function Row({ j, days, dayIndex, todayT, cal, selected, onSelect }) {
   return (
     <>
       <div className={`rowlabel ${selected ? 'sel' : ''}`} onClick={onSelect}>
@@ -258,7 +316,7 @@ function Row({ j, days, dayIndex, todayT, selected, onSelect }) {
       <div className="rowtrack" style={{ gridColumn: `span ${days.length}` }}>
         <div className="cellrow" style={{ gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
           {days.map((d, i) => (
-            <div key={i} className={`cell ${!isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
+            <div key={i} className={`cell ${!cal.isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
           ))}
         </div>
         {OPS.map((o) => {
@@ -274,7 +332,7 @@ function Row({ j, days, dayIndex, todayT, selected, onSelect }) {
   )
 }
 
-function LoadRow({ op, counts, cap, days, todayT, onCap }) {
+function LoadRow({ op, counts, cap, days, todayT, cal, onCap }) {
   return (
     <>
       <div className="loadlabel">
@@ -284,7 +342,7 @@ function LoadRow({ op, counts, cap, days, todayT, onCap }) {
       </div>
       <div className="cellrow" style={{ gridColumn: `span ${days.length}`, gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
         {days.map((d, i) => {
-          const c = counts[i], work = isWorkday(d), over = work && c > cap
+          const c = counts[i], work = cal.isWorkday(d), over = work && c > cap
           return (
             <div key={i}
               className={`lcell ${!work ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''} ${over ? 'over' : ''}`}
@@ -322,9 +380,17 @@ function Style() {
     .grid { display: grid; }
     .corner { position: sticky; left: 0; background: #FFF; z-index: 3; border-right: 1px solid #D4D9DC; }
     .month { font-size: 11px; font-weight: 600; color: #5B6670; padding: 6px 0 2px 4px; border-left: 1px solid #E4E8EA; overflow: hidden; white-space: nowrap; }
-    .dayhead { font-size: 10px; text-align: center; color: #7A848C; padding: 2px 0 6px; border-left: 1px solid #F0F2F3; }
+    .dayhead { font-size: 10px; text-align: center; color: #7A848C; padding: 2px 0 6px; border-left: 1px solid #F0F2F3; position: relative; user-select: none; }
     .dayhead.we { background: #F5F6F7; color: #B9C0C5; }
     .dayhead.today { color: #1B2126; font-weight: 700; }
+    .dayhead.clickable { cursor: pointer; }
+    .dayhead.clickable:hover { background: #E7ECEF; color: #1B2126; }
+    /* A day set by hand, so an off Thursday reads differently from a weekend. */
+    .dayhead.ovr::before { content: ''; position: absolute; left: 3px; right: 3px; bottom: 1px; height: 2px; border-radius: 1px; background: #C0722F; }
+    .offchip { background: #F5F6F7; border: 1px solid #C6CDD1; }
+    .hint { color: #7A848C; }
+    .hint.bad { color: #B3382E; }
+    .hint code { background: #E4E8EA; padding: 1px 4px; border-radius: 3px; }
     .rowlabel { position: sticky; left: 0; background: #FFF; z-index: 2; border-top: 1px solid #E4E8EA; border-right: 1px solid #D4D9DC; padding: 8px 10px; cursor: pointer; }
     .rowlabel:hover { background: #F6F8F9; }
     .rowlabel.sel { background: #EDF2F6; }

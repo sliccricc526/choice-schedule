@@ -20,21 +20,35 @@ insert into public.station_caps (station, cap) values
   ('fab', 2), ('paint', 1), ('asm', 2)
 on conflict (station) do nothing;
 
+-- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
+-- closes the shop (holiday, shutdown), working=true opens a weekend for
+-- overtime. Days with no row follow the default, so this table stays small.
+create table if not exists public.day_overrides (
+  day date primary key,
+  working boolean not null,
+  note text not null default '',
+  created_at timestamptz not null default now()
+);
+
 -- Row Level Security: open to anyone holding the anon key (internal-tool mode).
 -- To restrict to logged-in users later, change `using (true)` to
 -- `using (auth.role() = 'authenticated')` on each policy and enable
 -- Supabase Auth in the app.
 alter table public.jobs enable row level security;
 alter table public.station_caps enable row level security;
+alter table public.day_overrides enable row level security;
 
 create policy "jobs open access" on public.jobs
   for all using (true) with check (true);
 create policy "caps open access" on public.station_caps
   for all using (true) with check (true);
+create policy "days open access" on public.day_overrides
+  for all using (true) with check (true);
 
 -- Live sync between users: publish changes over realtime.
 alter publication supabase_realtime add table public.jobs;
 alter publication supabase_realtime add table public.station_caps;
+alter publication supabase_realtime add table public.day_overrides;
 
 -- Optional starter data (delete these rows once real units are in):
 insert into public.jobs (unit, description, delivery_date, fab_days, paint_days, asm_days) values
