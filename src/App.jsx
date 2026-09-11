@@ -1,16 +1,27 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
-  OPS, strip, addDays, daysBetween, isWorkday, scheduleJob, levelSchedule, isoDate, parseDate,
+  OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
+  isoDate, parseDate,
 } from './engine.js'
 
 const COL = 26
+const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
 export default function App() {
   const today = useMemo(() => strip(new Date()), [])
   const [jobs, setJobs] = useState([])
   const [caps, setCaps] = useState({ fab: 2, paint: 1, asm: 2 })
+  // ISO date -> whether the shop works that day, overriding the Mon–Fri default.
+  const [dayOverrides, setDayOverrides] = useState(() => new Map())
+  // False when the day_overrides table isn't there yet, so the board still works.
+  const [calendarEnabled, setCalendarEnabled] = useState(true)
+  // Part-number catalog: the standard build for each trailer model.
+  const [parts, setParts] = useState([])
+  const [partsEnabled, setPartsEnabled] = useState(true)
+  const [showParts, setShowParts] = useState(false)
+  const [addPart, setAddPart] = useState('')
   const [leveled, setLeveled] = useState(true)
   const [selected, setSelected] = useState(null)
   const [status, setStatus] = useState(configured ? 'loading' : 'unconfigured')
@@ -20,9 +31,11 @@ export default function App() {
   const load = useCallback(async () => {
     if (!supabase) return
     try {
-      const [jr, cr] = await Promise.all([
+      const [jr, cr, dr, pr] = await Promise.all([
         supabase.from('jobs').select('*').order('delivery_date'),
         supabase.from('station_caps').select('*'),
+        supabase.from('day_overrides').select('*'),
+        supabase.from('part_numbers').select('*').order('part_number'),
       ])
       if (jr.error || cr.error) {
         setStatus('error')
@@ -33,10 +46,18 @@ export default function App() {
         id: r.id, unit: r.unit, desc: r.description || '',
         delivery: parseDate(r.delivery_date),
         fab: r.fab_days, paint: r.paint_days, asm: r.asm_days,
+        partId: r.part_number_id || '',
       })))
       const c = { fab: 2, paint: 1, asm: 2 }
       ;(cr.data || []).forEach((r) => { c[r.station] = r.cap })
       setCaps(c)
+      // The calendar is optional: if the table hasn't been created yet, fall back
+      // to plain weekends rather than failing the whole board.
+      setCalendarEnabled(!dr.error)
+      setDayOverrides(dr.error ? new Map() : new Map((dr.data || []).map((r) => [r.day, r.working])))
+      // The catalog is optional the same way, so the board still runs without it.
+      setPartsEnabled(!pr.error)
+      setParts(pr.error ? [] : (pr.data || []))
       setStatus('ready')
     } catch (err) {
       setStatus('error')
@@ -67,6 +88,8 @@ export default function App() {
       .channel('schedule-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, load)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'station_caps' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'day_overrides' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, load)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [load])
@@ -80,16 +103,54 @@ export default function App() {
     if (patch.fab !== undefined) row.fab_days = patch.fab
     if (patch.paint !== undefined) row.paint_days = patch.paint
     if (patch.asm !== undefined) row.asm_days = patch.asm
+    if (patch.partId !== undefined) row.part_number_id = patch.partId || null
     const { error: e } = await supabase.from('jobs').update(row).eq('id', id)
     if (e) { setError(e.message); load() }
   }
   const addJob = async () => {
-    const delivery = addDays(today, 30)
-    const { data, error: e } = await supabase.from('jobs')
-      .insert({ unit: 'NEW UNIT', description: '', delivery_date: isoDate(delivery), fab_days: 8, paint_days: 2, asm_days: 4 })
-      .select().single()
+    const p = parts.find((x) => x.id === addPart)
+    const row = {
+      unit: 'NEW UNIT',
+      description: p ? p.description : '',
+      delivery_date: isoDate(addDays(today, 30)),
+      fab_days: p ? p.fab_days : 8,
+      paint_days: p ? p.paint_days : 2,
+      asm_days: p ? p.asm_days : 4,
+    }
+    if (partsEnabled) row.part_number_id = p ? p.id : null
+    const { data, error: e } = await supabase.from('jobs').insert(row).select().single()
     if (e) { setError(e.message); return }
     setSelected(data.id)
+    load()
+  }
+  // Stamp a part number's standard build onto a unit. Values are copied, not
+  // linked, so the unit can be tuned afterwards without touching the catalog.
+  const applyPart = (jobId, partId) => {
+    const p = parts.find((x) => x.id === partId)
+    if (!p) return saveJob(jobId, { partId: '' })
+    saveJob(jobId, {
+      partId: p.id, desc: p.description,
+      fab: p.fab_days, paint: p.paint_days, asm: p.asm_days,
+    })
+  }
+
+  const savePart = async (id, patch) => {
+    setParts((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)))
+    const { error: e } = await supabase.from('part_numbers').update(patch).eq('id', id)
+    if (e) { setError(e.message); load() }
+  }
+  const newPart = async () => {
+    const taken = new Set(parts.map((p) => p.part_number))
+    let name = 'NEW-PN'
+    for (let n = 2; taken.has(name); n++) name = `NEW-PN-${n}`
+    const { error: e } = await supabase.from('part_numbers')
+      .insert({ part_number: name, description: '', fab_days: 8, paint_days: 2, asm_days: 4 })
+    if (e) { setError(e.message); return }
+    load()
+  }
+  const removePart = async (id) => {
+    const { error: e } = await supabase.from('part_numbers').delete().eq('id', id)
+    if (e) setError(e.message)
     load()
   }
   const removeJob = async (id) => {
@@ -98,16 +159,43 @@ export default function App() {
     if (e) setError(e.message)
     load()
   }
+  // Click a date to close the shop that day (holiday, shutdown) or to open a
+  // weekend for overtime. A day back at its Mon–Fri default drops its row.
+  const toggleDay = async (d) => {
+    if (!calendarEnabled) return
+    const iso = isoDate(d)
+    const working = !cal.isWorkday(d)
+    const isDefault = working === !isWeekend(d)
+    setDayOverrides((m) => {
+      const n = new Map(m)
+      if (isDefault) n.delete(iso); else n.set(iso, working)
+      return n
+    })
+    const { error: e } = isDefault
+      ? await supabase.from('day_overrides').delete().eq('day', iso)
+      : await supabase.from('day_overrides').upsert({ day: iso, working })
+    if (e) { setError(e.message); load() }
+  }
   const saveCap = async (station, cap) => {
     setCaps((c) => ({ ...c, [station]: cap }))
     const { error: e } = await supabase.from('station_caps').upsert({ station, cap })
     if (e) { setError(e.message); load() }
   }
 
-  const scheduled = useMemo(() => {
-    const list = leveled ? levelSchedule(jobs, caps, today) : jobs.map((j) => scheduleJob(j, today))
-    return list.sort((a, b) => a.mustStart - b.mustStart)
-  }, [jobs, caps, leveled, today])
+  const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
+
+  const { scheduled, scheduleError } = useMemo(() => {
+    try {
+      const list = leveled
+        ? levelSchedule(jobs, caps, today, cal)
+        : jobs.map((j) => scheduleJob(j, today, cal))
+      return { scheduled: list.sort((a, b) => a.mustStart - b.mustStart), scheduleError: '' }
+    } catch (err) {
+      // A calendar with nearly everything switched off leaves the scheduler with
+      // nowhere to put the work; say so instead of showing a half-built board.
+      return { scheduled: [], scheduleError: String((err && err.message) || err) }
+    }
+  }, [jobs, caps, leveled, today, cal])
 
   const { days, months } = useMemo(() => {
     let min = today, max = addDays(today, 14)
@@ -138,15 +226,22 @@ export default function App() {
     scheduled.forEach((j) => OPS.forEach((o) => {
       const s = j.spans[o.key]
       for (let d = strip(s.start); d <= s.end; d = addDays(d, 1))
-        if (isWorkday(d)) out[o.key][daysBetween(days[0], d)]++
+        if (cal.isWorkday(d)) out[o.key][daysBetween(days[0], d)]++
     }))
     return out
-  }, [scheduled, days])
+  }, [scheduled, days, cal])
 
   const overDays = OPS.reduce(
-    (n, o) => n + loads[o.key].filter((c, i) => isWorkday(days[i]) && c > caps[o.key]).length, 0)
+    (n, o) => n + loads[o.key].filter((c, i) => cal.isWorkday(days[i]) && c > caps[o.key]).length, 0)
+  const daysOff = days.filter((d) => cal.isOverridden(d) && !cal.isWorkday(d)).length
+  const daysOn = days.filter((d) => cal.isOverridden(d) && cal.isWorkday(d)).length
   const atRisk = scheduled.filter((j) => j.late).length
   const sel = scheduled.find((j) => j.id === selected)
+  const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
+  const selPart = sel ? partsById.get(sel.partId) : null
+  // A unit whose numbers have been tuned away from its part number's standard.
+  const selDrift = selPart && (selPart.description !== sel.desc
+    || OPS.some((o) => selPart[`${o.key}_days`] !== sel[o.key]))
   const todayT = today.getTime()
 
   if (status === 'unconfigured') return (
@@ -178,6 +273,9 @@ export default function App() {
           <div><b>{scheduled.length}</b> units in plan</div>
           <div className={atRisk ? 'bad' : ''}><b>{atRisk}</b> {leveled ? 'projected late' : 'behind required start'}</div>
           <div className={overDays ? 'bad' : ''}><b>{overDays}</b> overloaded station-days</div>
+          {(daysOff || daysOn) ? (
+            <div><b>{daysOff}</b> closed{daysOn ? <> · <b>{daysOn}</b> extra</> : null}</div>
+          ) : null}
         </div>
       </div>
 
@@ -185,6 +283,10 @@ export default function App() {
         {OPS.map((o) => <div key={o.key}><span className="chip" style={{ background: o.color }} />{o.label}</div>)}
         <div><span className="chip todaychip" />Today</div>
         <div>▼ Delivery</div>
+        <div><span className="chip offchip" />Shop closed</div>
+        {calendarEnabled
+          ? <div className="hint">Click any date to close or open that day</div>
+          : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
       </div>
 
       <div className="boardwrap">
@@ -192,12 +294,23 @@ export default function App() {
           <div className="corner" />
           {months.map((m, i) => <div key={i} className="month" style={{ gridColumn: `span ${m.count}` }}>{m.label}</div>)}
           <div className="corner" />
-          {days.map((d, i) => (
-            <div key={i} className={`dayhead ${!isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'today' : ''}`}>{d.getDate()}</div>
-          ))}
+          {days.map((d, i) => {
+            const off = !cal.isWorkday(d), set = cal.isOverridden(d)
+            return (
+              <div key={i}
+                className={`dayhead ${off ? 'we' : ''} ${set ? 'ovr' : ''} ${d.getTime() === todayT ? 'today' : ''} ${calendarEnabled ? 'clickable' : ''}`}
+                onClick={() => toggleDay(d)}
+                title={calendarEnabled
+                  ? `${fmt(d)} — ${off ? 'closed' : 'working'}${set ? ' (set by hand)' : ''}. Click to ${off ? 'open' : 'close'}.`
+                  : undefined}>
+                {d.getDate()}
+              </div>
+            )
+          })}
 
           {scheduled.map((j) => (
-            <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT}
+            <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
+              pn={partsById.get(j.partId)?.part_number}
               selected={selected === j.id}
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
@@ -205,7 +318,7 @@ export default function App() {
           <div className="secthead">Station load — units per day</div>
           <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
           {OPS.map((o) => (
-            <LoadRow key={o.key} op={o} counts={loads[o.key]} cap={caps[o.key]} days={days} todayT={todayT}
+            <LoadRow key={o.key} op={o} counts={loads[o.key]} cap={caps[o.key]} days={days} todayT={todayT} cal={cal}
               onCap={(v) => saveCap(o.key, v)} />
           ))}
         </div>
@@ -221,11 +334,26 @@ export default function App() {
           <div className="field"><span>Delivery date</span>
             <input type="date" value={isoDate(sel.delivery)}
               onChange={(e) => e.target.value && saveJob(sel.id, { delivery: parseDate(e.target.value) })} /></div>
+          {partsEnabled && (
+            <div className="field"><span>Part number</span>
+              <select value={sel.partId || ''} onChange={(e) => applyPart(sel.id, e.target.value)}>
+                <option value="">— none —</option>
+                {parts.map((p) => <option key={p.id} value={p.id}>{p.part_number}</option>)}
+              </select>
+            </div>
+          )}
           {OPS.map((o) => (
             <div className="field" key={o.key}><span>{o.label} (working days)</span>
               <input className="num" type="number" min="1" value={sel[o.key]}
                 onChange={(e) => saveJob(sel.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} /></div>
           ))}
+          {selDrift && (
+            <div className="driftline">
+              Tuned away from {selPart.part_number}'s standard
+              ({OPS.map((o) => selPart[`${o.key}_days`]).join(' / ')} days).
+              <button className="btn sm" onClick={() => applyPart(sel.id, selPart.id)}>Reset to standard</button>
+            </div>
+          )}
           <div className={`mustline ${sel.late ? 'bad' : ''}`}>
             {leveled
               ? sel.late
@@ -241,24 +369,69 @@ export default function App() {
           </div>
         </div>
       ) : (
-        <div className="addrow"><button className="btn" onClick={addJob}>Add unit</button></div>
+        <div className="addrow">
+          {partsEnabled && (
+            <select value={addPart} onChange={(e) => setAddPart(e.target.value)} title="Start this unit from a part number">
+              <option value="">Blank unit</option>
+              {parts.map((p) => (
+                <option key={p.id} value={p.id}>{p.part_number}{p.description ? ` — ${p.description}` : ''}</option>
+              ))}
+            </select>
+          )}
+          <button className="btn" onClick={addJob}>Add unit</button>
+          {partsEnabled
+            ? <button className="btn" onClick={() => setShowParts((v) => !v)}>
+                {showParts ? 'Hide' : 'Edit'} part numbers ({parts.length})
+              </button>
+            : <span className="hint bad">Part numbers need the <code>part_numbers</code> table — see supabase/schema.sql</span>}
+        </div>
       )}
+      {showParts && partsEnabled && (
+        <div className="panel wide">
+          <h3>Part numbers</h3>
+          <p className="sub">The standard build for each model. Picking one when you add a unit copies
+            these onto that unit — editing a part number here never reschedules units already in the shop.</p>
+          <div className="parthead">
+            <span>Part number</span><span>Description</span>
+            {OPS.map((o) => <span key={o.key}>{SHORT[o.key]}</span>)}
+            <span />
+          </div>
+          {parts.map((p) => (
+            <div className="partrow" key={p.id}>
+              <input value={p.part_number} onChange={(e) => savePart(p.id, { part_number: e.target.value })} />
+              <input value={p.description} onChange={(e) => savePart(p.id, { description: e.target.value })} />
+              {OPS.map((o) => (
+                <input key={o.key} type="number" min="1" value={p[`${o.key}_days`]}
+                  onChange={(e) => savePart(p.id, { [`${o.key}_days`]: Math.max(1, parseInt(e.target.value) || 1) })} />
+              ))}
+              <button className="btn danger sm" onClick={() => removePart(p.id)}>Remove</button>
+            </div>
+          ))}
+          {parts.length === 0 && (
+            <div className="sub">No part numbers yet — add one, then pick it when you add a unit.</div>
+          )}
+          <div className="btnrow"><button className="btn" onClick={newPart}>Add part number</button></div>
+        </div>
+      )}
+      {scheduleError && <div className="notice bad">Couldn't build the schedule: {scheduleError}</div>}
       {error && status === 'ready' && <div className="notice bad">Last change didn't save: {error}</div>}
     </div>
   )
 }
 
-function Row({ j, days, dayIndex, todayT, selected, onSelect }) {
+function Row({ j, days, dayIndex, todayT, cal, pn, selected, onSelect }) {
   return (
     <>
       <div className={`rowlabel ${selected ? 'sel' : ''}`} onClick={onSelect}>
         <div className="unit">{j.unit}{j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}</div>
-        <div className="desc">{j.desc ? `${j.desc} · ` : ''}deliver {fmt(j.delivery)}</div>
+        <div className="desc" title={`${pn ? `${pn} · ` : ''}${j.desc ? `${j.desc} · ` : ''}deliver ${fmt(j.delivery)}`}>
+          {pn && <span className="pntag">{pn}</span>}{j.desc ? `${j.desc} · ` : ''}deliver {fmt(j.delivery)}
+        </div>
       </div>
       <div className="rowtrack" style={{ gridColumn: `span ${days.length}` }}>
         <div className="cellrow" style={{ gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
           {days.map((d, i) => (
-            <div key={i} className={`cell ${!isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
+            <div key={i} className={`cell ${!cal.isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
           ))}
         </div>
         {OPS.map((o) => {
@@ -274,7 +447,7 @@ function Row({ j, days, dayIndex, todayT, selected, onSelect }) {
   )
 }
 
-function LoadRow({ op, counts, cap, days, todayT, onCap }) {
+function LoadRow({ op, counts, cap, days, todayT, cal, onCap }) {
   return (
     <>
       <div className="loadlabel">
@@ -284,7 +457,7 @@ function LoadRow({ op, counts, cap, days, todayT, onCap }) {
       </div>
       <div className="cellrow" style={{ gridColumn: `span ${days.length}`, gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
         {days.map((d, i) => {
-          const c = counts[i], work = isWorkday(d), over = work && c > cap
+          const c = counts[i], work = cal.isWorkday(d), over = work && c > cap
           return (
             <div key={i}
               className={`lcell ${!work ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''} ${over ? 'over' : ''}`}
@@ -322,14 +495,22 @@ function Style() {
     .grid { display: grid; }
     .corner { position: sticky; left: 0; background: #FFF; z-index: 3; border-right: 1px solid #D4D9DC; }
     .month { font-size: 11px; font-weight: 600; color: #5B6670; padding: 6px 0 2px 4px; border-left: 1px solid #E4E8EA; overflow: hidden; white-space: nowrap; }
-    .dayhead { font-size: 10px; text-align: center; color: #7A848C; padding: 2px 0 6px; border-left: 1px solid #F0F2F3; }
+    .dayhead { font-size: 10px; text-align: center; color: #7A848C; padding: 2px 0 6px; border-left: 1px solid #F0F2F3; position: relative; user-select: none; }
     .dayhead.we { background: #F5F6F7; color: #B9C0C5; }
     .dayhead.today { color: #1B2126; font-weight: 700; }
+    .dayhead.clickable { cursor: pointer; }
+    .dayhead.clickable:hover { background: #E7ECEF; color: #1B2126; }
+    /* A day set by hand, so an off Thursday reads differently from a weekend. */
+    .dayhead.ovr::before { content: ''; position: absolute; left: 3px; right: 3px; bottom: 1px; height: 2px; border-radius: 1px; background: #C0722F; }
+    .offchip { background: #F5F6F7; border: 1px solid #C6CDD1; }
+    .hint { color: #7A848C; }
+    .hint.bad { color: #B3382E; }
+    .hint code { background: #E4E8EA; padding: 1px 4px; border-radius: 3px; }
     .rowlabel { position: sticky; left: 0; background: #FFF; z-index: 2; border-top: 1px solid #E4E8EA; border-right: 1px solid #D4D9DC; padding: 8px 10px; cursor: pointer; }
     .rowlabel:hover { background: #F6F8F9; }
     .rowlabel.sel { background: #EDF2F6; }
     .unit { font-size: 13px; font-weight: 700; display: flex; gap: 8px; align-items: center; }
-    .desc { font-size: 11px; color: #5B6670; margin-top: 1px; }
+    .desc { font-size: 11px; color: #5B6670; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .flag { font-size: 10px; font-weight: 700; color: #fff; background: #B3382E; border-radius: 3px; padding: 1px 5px; white-space: nowrap; }
     .rowtrack { position: relative; }
     .cellrow { display: grid; }
@@ -350,7 +531,19 @@ function Style() {
     .lcell.we { background: #F5F6F7; }
     .lcell.over { background: #F3D2CE !important; color: #7C221B !important; font-weight: 700; }
     .panel { margin: 0 24px 28px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 16px 18px; max-width: 560px; }
+    .panel.wide { max-width: 780px; }
     .panel h3 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
+    .panel .sub { margin: -6px 0 14px; font-size: 12px; color: #5B6670; line-height: 1.5; }
+    .parthead, .partrow { display: grid; grid-template-columns: 130px minmax(0, 1fr) 62px 62px 62px 82px; gap: 8px; align-items: center; }
+    .parthead { font-size: 11px; font-weight: 600; color: #7A848C; padding-bottom: 5px; border-bottom: 1px solid #E4E8EA; margin-bottom: 8px; }
+    .partrow { margin-bottom: 8px; }
+    .partrow input { font-family: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid #C6CDD1; border-radius: 4px; width: 100%; }
+    .partrow input[type=number] { text-align: center; }
+    .btn.sm { padding: 5px 10px; font-size: 12px; }
+    .pntag { display: inline-block; font-size: 10px; font-weight: 700; color: #44688F; background: #E3EAF2; border-radius: 3px; padding: 1px 5px; margin-right: 6px; }
+    .field select { font-family: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid #C6CDD1; border-radius: 4px; width: 160px; }
+    .driftline { font-size: 12px; background: #F5E8DA; color: #7A4A16; border-radius: 4px; padding: 9px 12px; margin: 12px 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; line-height: 1.4; }
+    .addrow select { font-family: inherit; font-size: 13px; padding: 7px 8px; border: 1px solid #C6CDD1; border-radius: 4px; max-width: 320px; }
     .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 13px; }
     .field input { font-family: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid #C6CDD1; border-radius: 4px; width: 160px; }
     .field input.num { width: 64px; }
@@ -360,6 +553,6 @@ function Style() {
     .btn:hover { background: #F2F4F5; }
     .btn.danger { color: #B3382E; border-color: #DCB4B0; }
     .btnrow { display: flex; gap: 10px; }
-    .addrow { margin: 0 24px 16px; }
+    .addrow { margin: 0 24px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   `}</style>
 }
