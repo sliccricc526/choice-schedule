@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
-  DAY, OPS, strip, isWorkday, scheduleJob, levelSchedule, isoDate, parseDate,
+  OPS, strip, addDays, daysBetween, isWorkday, scheduleJob, levelSchedule, isoDate, parseDate,
 } from './engine.js'
 
 const COL = 26
@@ -84,7 +84,7 @@ export default function App() {
     if (e) { setError(e.message); load() }
   }
   const addJob = async () => {
-    const delivery = strip(new Date(today.getTime() + 30 * DAY))
+    const delivery = addDays(today, 30)
     const { data, error: e } = await supabase.from('jobs')
       .insert({ unit: 'NEW UNIT', description: '', delivery_date: isoDate(delivery), fab_days: 8, paint_days: 2, asm_days: 4 })
       .select().single()
@@ -110,16 +110,16 @@ export default function App() {
   }, [jobs, caps, leveled, today])
 
   const { days, months } = useMemo(() => {
-    let min = today, max = strip(new Date(today.getTime() + 14 * DAY))
+    let min = today, max = addDays(today, 14)
     scheduled.forEach((j) => {
       if (j.spans.fab.start < min) min = j.spans.fab.start
       if (j.delivery > max) max = j.delivery
       if (j.spans.asm.end > max) max = j.spans.asm.end
     })
-    min = strip(new Date(min.getTime() - 3 * DAY))
-    max = strip(new Date(max.getTime() + 4 * DAY))
+    min = addDays(min, -3)
+    max = addDays(max, 4)
     const days = []
-    for (let d = new Date(min); d <= max; d = new Date(d.getTime() + DAY)) days.push(strip(d))
+    for (let d = min; d <= max; d = addDays(d, 1)) days.push(d)
     const months = []
     days.forEach((d) => {
       const label = d.toLocaleDateString('en-US', { month: 'long' })
@@ -130,15 +130,15 @@ export default function App() {
     return { days, months }
   }, [scheduled, today])
 
-  const dayIndex = (d) => Math.round((strip(d) - days[0]) / DAY)
+  const dayIndex = (d) => daysBetween(days[0], d)
 
   const loads = useMemo(() => {
     const out = {}
     OPS.forEach((o) => { out[o.key] = days.map(() => 0) })
     scheduled.forEach((j) => OPS.forEach((o) => {
       const s = j.spans[o.key]
-      for (let d = new Date(s.start); d <= s.end; d = new Date(d.getTime() + DAY))
-        if (isWorkday(d)) out[o.key][Math.round((strip(d) - days[0]) / DAY)]++
+      for (let d = strip(s.start); d <= s.end; d = addDays(d, 1))
+        if (isWorkday(d)) out[o.key][daysBetween(days[0], d)]++
     }))
     return out
   }, [scheduled, days])

@@ -9,15 +9,27 @@ export const OPS = [
 ]
 
 export const strip = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x }
+// Calendar-day arithmetic. Adding a fixed 86400000 ms drifts by an hour across a
+// daylight-saving change, which leaves dates that are no longer local midnight and
+// never compare equal to a stripped date — use this everywhere instead.
+export const addDays = (d, n) => { const x = strip(d); x.setDate(x.getDate() + n); return x }
+// Whole calendar days from a to b; the rounding absorbs the DST hour.
+export const daysBetween = (a, b) => Math.round((strip(b) - strip(a)) / DAY)
 export const isWorkday = (d) => d.getDay() !== 0 && d.getDay() !== 6
-export const prevWorkday = (d) => { let x = new Date(d); do { x = new Date(x.getTime() - DAY) } while (!isWorkday(x)); return x }
-export const nextWorkday = (d) => { let x = new Date(d); do { x = new Date(x.getTime() + DAY) } while (!isWorkday(x)); return x }
-export const onOrBeforeWorkday = (d) => (isWorkday(d) ? d : prevWorkday(d))
-export const backSpan = (end, n) => { let s = new Date(end); for (let i = 1; i < n; i++) s = prevWorkday(s); return s }
+export const prevWorkday = (d) => { let x = addDays(d, -1); while (!isWorkday(x)) x = addDays(x, -1); return x }
+export const nextWorkday = (d) => { let x = addDays(d, 1); while (!isWorkday(x)) x = addDays(x, 1); return x }
+export const onOrBeforeWorkday = (d) => (isWorkday(d) ? strip(d) : prevWorkday(d))
+export const backSpan = (end, n) => { let s = strip(end); for (let i = 1; i < n; i++) s = prevWorkday(s); return s }
 export const workdaysBetween = (a, b) => {
-  let c = 0, dir = b >= a ? 1 : -1, cur = new Date(a)
-  while (cur.getTime() !== strip(b).getTime()) {
-    cur = new Date(cur.getTime() + dir * DAY)
+  let cur = strip(a)
+  const end = strip(b)
+  // An unparseable date would otherwise never meet the loop's exit test and
+  // would spin forever, freezing the page.
+  if (Number.isNaN(cur.getTime()) || Number.isNaN(end.getTime())) return 0
+  const dir = end >= cur ? 1 : -1
+  let c = 0
+  while (cur.getTime() !== end.getTime()) {
+    cur = addDays(cur, dir)
     if (isWorkday(cur)) c += dir
   }
   return c
@@ -51,7 +63,7 @@ export function levelSchedule(jobs, caps, today) {
   const usage = { fab: {}, paint: {}, asm: {} }
   const free = (st, d) => (usage[st][isoDate(d)] || 0) < Math.max(1, caps[st])
   const take = (st, s, e) => {
-    let d = new Date(s)
+    let d = strip(s)
     while (true) {
       usage[st][isoDate(d)] = (usage[st][isoDate(d)] || 0) + 1
       if (d.getTime() >= e.getTime()) break
@@ -61,10 +73,10 @@ export function levelSchedule(jobs, caps, today) {
   const latestBlock = (st, n, latestEnd, floor) => {
     let end = onOrBeforeWorkday(latestEnd)
     while (end >= floor) {
-      let ok = true, d = new Date(end), s = new Date(end)
+      let ok = true, d = strip(end), s = strip(end)
       for (let i = 0; i < n; i++) {
         if (!free(st, d)) { ok = false; break }
-        s = new Date(d)
+        s = strip(d)
         if (i < n - 1) d = prevWorkday(d)
       }
       if (ok) return s >= floor ? { start: s, end } : null
@@ -75,10 +87,10 @@ export function levelSchedule(jobs, caps, today) {
   const forwardBlock = (st, n, earliest) => {
     let start = isWorkday(earliest) ? strip(earliest) : nextWorkday(earliest)
     for (let g = 0; g < 500; g++) {
-      let ok = true, d = new Date(start), e = new Date(start)
+      let ok = true, d = strip(start), e = strip(start)
       for (let i = 0; i < n; i++) {
         if (!free(st, d)) { ok = false; break }
-        e = new Date(d)
+        e = strip(d)
         if (i < n - 1) d = nextWorkday(d)
       }
       if (ok) return { start, end: e }
