@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
@@ -29,6 +29,7 @@ export default function App() {
   const [bootErrors, setBootErrors] = useState([])
   // undefined while we're still asking Supabase, null when signed out.
   const [session, setSession] = useState(undefined)
+  const [showPassword, setShowPassword] = useState(false)
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -67,15 +68,24 @@ export default function App() {
     }
   }, [])
 
+  // Which account the board is currently showing. Token refreshes and the
+  // re-authentication behind a password change both raise auth events for the
+  // same person — reloading the board on those would tear down whatever the
+  // user is in the middle of, so only a genuine change of account counts.
+  const userIdRef = useRef(null)
   useEffect(() => {
     if (!supabase) return setSession(null)
-    supabase.auth.getSession().then(({ data }) => setSession(data.session || null))
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+    const apply = (s) => {
+      const prevId = userIdRef.current
+      const nextId = s ? s.user.id : null
+      userIdRef.current = nextId
       setSession(s || null)
-      // A fresh sign-in starts a fresh load; a sign-out drops what was on screen.
-      setStatus(s ? 'loading' : 'ready')
-      if (!s) { setJobs([]); setParts([]); setDayOverrides(new Map()) }
-    })
+      if (nextId === prevId) return
+      setStatus(nextId ? 'loading' : 'ready')
+      if (!nextId) { setJobs([]); setParts([]); setDayOverrides(new Map()) }
+    }
+    supabase.auth.getSession().then(({ data }) => apply(data.session || null))
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => apply(s || null))
     return () => sub.subscription.unsubscribe()
   }, [])
 
@@ -99,8 +109,9 @@ export default function App() {
     return () => clearTimeout(watchdog)
   }, [session, status])
 
+  const userId = session ? session.user.id : null
   useEffect(() => {
-    if (!supabase || !session) return
+    if (!supabase || !userId) return
     load()
     // Live sync: any change from any user refreshes every open board.
     const ch = supabase
@@ -111,7 +122,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, load)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-  }, [load, session])
+  }, [load, userId])
 
   const saveJob = async (id, patch) => {
     setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)))
@@ -299,6 +310,7 @@ export default function App() {
           ) : null}
           <div className="who">
             {session.user.email}
+            <button className="btn sm" onClick={() => setShowPassword(true)}>Change password</button>
             <button className="btn sm" onClick={() => supabase.auth.signOut()}>Sign out</button>
           </div>
         </div>
@@ -438,6 +450,7 @@ export default function App() {
           <div className="btnrow"><button className="btn" onClick={newPart}>Add part number</button></div>
         </div>
       )}
+      {showPassword && <ChangePassword email={session.user.email} onClose={() => setShowPassword(false)} />}
       {scheduleError && <div className="notice bad">Couldn't build the schedule: {scheduleError}</div>}
       {error && status === 'ready' && <div className="notice bad">Last change didn't save: {error}</div>}
     </div>
@@ -478,6 +491,79 @@ function SignIn() {
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
         <p className="sub small">Need an account, or forgotten your password? Ask whoever set up the board.</p>
+      </form>
+    </div>
+  )
+}
+
+const MIN_PASSWORD = 8
+
+function ChangePassword({ email, onClose }) {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const submit = async (e) => {
+    e.preventDefault()
+    if (next !== confirm) return setErr("The two new passwords don't match.")
+    if (next.length < MIN_PASSWORD) return setErr(`Use at least ${MIN_PASSWORD} characters.`)
+    setBusy(true)
+    setErr('')
+    // Check the current password first: a signed-in session left open on a shop
+    // machine shouldn't be enough on its own to take the account over.
+    const { error: badCurrent } = await supabase.auth.signInWithPassword({ email, password: current })
+    if (badCurrent) {
+      setBusy(false)
+      return setErr('Current password is incorrect.')
+    }
+    const { error } = await supabase.auth.updateUser({ password: next })
+    setBusy(false)
+    if (error) return setErr(error.message)
+    setDone(true)
+  }
+
+  return (
+    <div className="modalwrap" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <form className="loginbox" onSubmit={submit}>
+        <h1>Change password</h1>
+        <p className="sub">Signed in as {email}.</p>
+        {done ? (
+          <>
+            <div className="loginok">Password changed. Use the new one next time you sign in.</div>
+            <button className="btn primary" type="button" onClick={onClose}>Done</button>
+          </>
+        ) : (
+          <>
+            <label>Current password
+              <input type="password" autoComplete="current-password" required autoFocus
+                value={current} onChange={(e) => setCurrent(e.target.value)} />
+            </label>
+            <label>New password
+              <input type="password" autoComplete="new-password" required
+                value={next} onChange={(e) => setNext(e.target.value)} />
+            </label>
+            <label>New password again
+              <input type="password" autoComplete="new-password" required
+                value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            </label>
+            {err && <div className="loginerr">{err}</div>}
+            <button className="btn primary" type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Change password'}
+            </button>
+            <button className="btn linkish" type="button" onClick={onClose}>Cancel</button>
+            <p className="sub small">At least {MIN_PASSWORD} characters. There's no email reset on this
+              board — if you forget it, whoever set the board up has to reset it for you.</p>
+          </>
+        )}
       </form>
     </div>
   )
@@ -553,6 +639,10 @@ function Style() {
     .btn.primary { background: #1B2126; color: #FFF; border-color: #1B2126; width: 100%; padding: 9px 14px; }
     .btn.primary:hover { background: #333C44; }
     .btn.primary:disabled { opacity: .6; cursor: default; }
+    .modalwrap { position: fixed; inset: 0; background: rgba(27,33,38,.4); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 20; }
+    .loginok { font-size: 12px; background: #E1EEE6; color: #245039; border-radius: 4px; padding: 9px 11px; margin-bottom: 12px; line-height: 1.45; }
+    .btn.linkish { width: 100%; margin-top: 8px; border-color: transparent; background: transparent; color: #5B6670; }
+    .btn.linkish:hover { background: #F2F4F5; }
     .who { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #5B6670; padding-left: 12px; border-left: 1px solid #C6CDD1; }
     .notice { margin: 24px; padding: 14px 16px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; font-size: 14px; max-width: 640px; line-height: 1.5; }
     .notice.bad { background: #F8E7E5; border-color: #DCB4B0; color: #7C221B; }

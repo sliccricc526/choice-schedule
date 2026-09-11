@@ -52,6 +52,12 @@ There are no public signups — nobody can enrol themselves. Add people in the S
 
 Removing someone is the same screen — delete the user and their session stops working. Under **Authentication → Providers → Email**, leave *Enable signup* off so the signup endpoint stays closed.
 
+### Passwords
+
+Signed-in users can set their own password from **Change password** in the header. It asks for the current password first, so a session left open on a shop machine isn't enough on its own to take an account over. Minimum 8 characters.
+
+Hand out a temporary password when you create the account and let people change it on first sign-in. There is **no self-serve reset** — that would need an email link, and sending email needs an SMTP provider configured in Supabase, which this project deliberately doesn't have. So a forgotten password means you resetting it from **Authentication → Users**. If that becomes a nuisance, configuring SMTP and turning on the invite and recovery emails is the fix.
+
 ## How the engine schedules
 
 - **Leveling off:** pure just-in-time — each unit's final assembly is anchored to the delivery date, paint and fab chain backward through working days. Overloads show in red in the station-load section.
