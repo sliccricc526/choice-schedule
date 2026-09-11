@@ -15,27 +15,48 @@ export default function App() {
   const [selected, setSelected] = useState(null)
   const [status, setStatus] = useState(configured ? 'loading' : 'unconfigured')
   const [error, setError] = useState('')
+  const [bootErrors, setBootErrors] = useState([])
 
   const load = useCallback(async () => {
     if (!supabase) return
-    const [jr, cr] = await Promise.all([
-      supabase.from('jobs').select('*').order('delivery_date'),
-      supabase.from('station_caps').select('*'),
-    ])
-    if (jr.error || cr.error) {
+    try {
+      const [jr, cr] = await Promise.all([
+        supabase.from('jobs').select('*').order('delivery_date'),
+        supabase.from('station_caps').select('*'),
+      ])
+      if (jr.error || cr.error) {
+        setStatus('error')
+        setError((jr.error || cr.error).message)
+        return
+      }
+      setJobs((jr.data || []).map((r) => ({
+        id: r.id, unit: r.unit, desc: r.description || '',
+        delivery: parseDate(r.delivery_date),
+        fab: r.fab_days, paint: r.paint_days, asm: r.asm_days,
+      })))
+      const c = { fab: 2, paint: 1, asm: 2 }
+      ;(cr.data || []).forEach((r) => { c[r.station] = r.cap })
+      setCaps(c)
+      setStatus('ready')
+    } catch (err) {
       setStatus('error')
-      setError((jr.error || cr.error).message)
-      return
+      setError(String((err && err.message) || err))
     }
-    setJobs(jr.data.map((r) => ({
-      id: r.id, unit: r.unit, desc: r.description || '',
-      delivery: parseDate(r.delivery_date),
-      fab: r.fab_days, paint: r.paint_days, asm: r.asm_days,
-    })))
-    const c = { fab: 2, paint: 1, asm: 2 }
-    cr.data.forEach((r) => { c[r.station] = r.cap })
-    setCaps(c)
-    setStatus('ready')
+  }, [])
+
+  useEffect(() => {
+    const onErr = (e) => setBootErrors((b) => [...b, String(e.reason?.message || e.message || e.reason || e.error || 'unknown error')])
+    window.addEventListener('error', onErr)
+    window.addEventListener('unhandledrejection', onErr)
+    const watchdog = setTimeout(() => {
+      setStatus((s) => (s === 'loading' ? 'error' : s))
+      setError((prev) => prev || 'Loading stalled after 10 seconds without a reported cause. The messages below (if any) are the underlying errors.')
+    }, 10000)
+    return () => {
+      window.removeEventListener('error', onErr)
+      window.removeEventListener('unhandledrejection', onErr)
+      clearTimeout(watchdog)
+    }
   }, [])
 
   useEffect(() => {
@@ -136,7 +157,11 @@ export default function App() {
   if (status === 'loading') return <div className="shell"><Style /><div className="notice">Loading the schedule…</div></div>
   if (status === 'error') return (
     <div className="shell"><Style />
-      <div className="notice bad">Couldn't reach the schedule database: {error}. Check that the schema has been run in Supabase and the keys in your environment are right.</div>
+      <div className="notice bad">Couldn't finish loading the schedule: {error}
+        {bootErrors.length > 0 && (
+          <div style={{ marginTop: 8 }}>Browser reported: {bootErrors.slice(0, 5).join(' | ')}</div>
+        )}
+      </div>
     </div>
   )
 
@@ -283,7 +308,7 @@ function Style() {
     .notice.bad { background: #F8E7E5; border-color: #DCB4B0; color: #7C221B; }
     .notice code { background: #EEF0F1; padding: 1px 5px; border-radius: 3px; }
     .head { display: flex; align-items: baseline; justify-content: space-between; padding: 20px 24px 14px; flex-wrap: wrap; gap: 10px; }
-    .title { font-size: 22px; font-weight: 700; font-variation-settings: 'wdth' 75; }
+    .title { font-size: 22px; font-weight: 700; }
     .title span { font-weight: 400; color: #5B6670; }
     .stats { display: flex; gap: 22px; font-size: 13px; color: #3A434B; align-items: center; flex-wrap: wrap; }
     .stats b { font-size: 16px; }
