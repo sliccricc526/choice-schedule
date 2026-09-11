@@ -38,10 +38,19 @@ Selecting a part number **copies** its values onto that unit rather than linking
 
 ## Access control
 
-The schema ships in **internal-tool mode**: anyone with the app URL can read and edit (the anon key is public by design). Fine for a private link inside the company; when you want real logins, the path is:
-1. Enable an auth method in Supabase (email magic links are the least friction).
-2. In `supabase/schema.sql`'s policies, change `using (true)` / `with check (true)` to `auth.role() = 'authenticated'` and re-run the policy statements.
-3. Add a small sign-in gate in the app (Supabase's `signInWithOtp` is ~20 lines).
+The board is behind an email-and-password sign-in. Signing out clears what's on screen, and no data is requested until a session exists.
+
+**The sign-in screen is not what protects the data.** The anon key ships inside the public JavaScript bundle by design, so anyone who opens the page can read it out and call the REST API directly. What protects the data is that every policy in `supabase/schema.sql` is granted `to authenticated` — a request without a real session token matches no policy and comes back empty. Keep it that way: a policy granted to `public` (or `using (true)` with no role) reopens the whole database no matter what the UI does.
+
+### Managing accounts
+
+There are no public signups — nobody can enrol themselves. Add people in the Supabase dashboard:
+
+1. **Authentication → Users → Add user**.
+2. Enter their email and an initial password, and tick **Auto Confirm User** (without it they'd need a confirmation email, which needs SMTP set up).
+3. Send them the address, their password, and the app URL.
+
+Removing someone is the same screen — delete the user and their session stops working. Under **Authentication → Providers → Email**, leave *Enable signup* off so the signup endpoint stays closed.
 
 ## How the engine schedules
 
