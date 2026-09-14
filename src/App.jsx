@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
-  isoDate, parseDate,
+  isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL,
 } from './engine.js'
 
 const COL = 26
@@ -31,6 +31,8 @@ export default function App() {
   const [session, setSession] = useState(undefined)
   const [showPassword, setShowPassword] = useState(false)
   const [view, setView] = useState('board')
+  // False until the tracking columns exist on jobs, so the board still runs without them.
+  const [trackingEnabled, setTrackingEnabled] = useState(true)
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -46,11 +48,16 @@ export default function App() {
         setError((jr.error || cr.error).message)
         return
       }
-      setJobs((jr.data || []).map((r) => ({
+      const jrows = jr.data || []
+      setTrackingEnabled(jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], 'stage'))
+      setJobs(jrows.map((r) => ({
         id: r.id, unit: r.unit, desc: r.description || '',
         delivery: parseDate(r.delivery_date),
         fab: r.fab_days, paint: r.paint_days, asm: r.asm_days,
         partId: r.part_number_id || '',
+        stage: r.stage || 'none',
+        stageStarted: r.stage_started ? parseDate(r.stage_started) : null,
+        daysLeft: r.days_left == null ? null : r.days_left,
       })))
       const c = { fab: 2, paint: 1, asm: 2 }
       ;(cr.data || []).forEach((r) => { c[r.station] = r.cap })
@@ -135,6 +142,9 @@ export default function App() {
     if (patch.paint !== undefined) row.paint_days = patch.paint
     if (patch.asm !== undefined) row.asm_days = patch.asm
     if (patch.partId !== undefined) row.part_number_id = patch.partId || null
+    if (patch.stage !== undefined) row.stage = patch.stage
+    if (patch.stageStarted !== undefined) row.stage_started = patch.stageStarted ? isoDate(patch.stageStarted) : null
+    if (patch.daysLeft !== undefined) row.days_left = patch.daysLeft
     const { error: e } = await supabase.from('jobs').update(row).eq('id', id)
     if (e) { setError(e.message); load() }
   }
@@ -149,6 +159,7 @@ export default function App() {
       asm_days: p ? p.asm_days : 4,
     }
     if (partsEnabled) row.part_number_id = p ? p.id : null
+    if (trackingEnabled) row.stage = 'none'
     const { data, error: e } = await supabase.from('jobs').insert(row).select().single()
     if (e) { setError(e.message); return }
     setSelected(data.id)
@@ -190,6 +201,29 @@ export default function App() {
     if (e) setError(e.message)
     load()
   }
+  // Move a unit on to the next station. The station being left is logged with
+  // its planned and actual days, so estimates can be checked against reality.
+  const advanceStage = async (job) => {
+    if (!trackingEnabled) return
+    const from = job.stage || 'none'
+    if (from === 'done') return
+    if (from !== 'none') {
+      const { error: le } = await supabase.from('stage_log').upsert({
+        job_id: job.id, stage: from,
+        planned_days: job[from], actual_days: daysSpent(job, today, cal),
+      })
+      if (le) setError(le.message)
+    }
+    const to = nextStage(from)
+    await saveJob(job.id, to === 'done'
+      ? { stage: 'done', stageStarted: null, daysLeft: null }
+      : { stage: to, stageStarted: today, daysLeft: job[to] })
+  }
+  // Setting a stage by hand, for corrections.
+  const setStage = (job, stage) => saveJob(job.id, stage === 'none' || stage === 'done'
+    ? { stage, stageStarted: null, daysLeft: null }
+    : { stage, stageStarted: today, daysLeft: job[stage] })
+
   // Click a date to close the shop that day (holiday, shutdown) or to open a
   // weekend for overtime. A day back at its Mon–Fri default drops its row.
   const toggleDay = async (d) => {
@@ -228,6 +262,16 @@ export default function App() {
     }
   }, [jobs, caps, leveled, today, cal])
 
+  // Where the work actually lands: remaining work pushed forward from today.
+  // The plan above says when work *should* happen; this says when it will.
+  const { projected, projectError } = useMemo(() => {
+    try { return { projected: projectSchedule(jobs, caps, today, cal), projectError: '' } }
+    catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
+  }, [jobs, caps, today, cal])
+  const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
+  const slipping = projected.filter((p) => p.slipping).length
+  const onFloor = jobs.filter(underway).length
+
   const { days, months } = useMemo(() => {
     let min = today, max = addDays(today, 14)
     scheduled.forEach((j) => {
@@ -235,6 +279,7 @@ export default function App() {
       if (j.delivery > max) max = j.delivery
       if (j.spans.asm.end > max) max = j.spans.asm.end
     })
+    projected.forEach((p) => { if (p.projectedEnd && p.projectedEnd > max) max = p.projectedEnd })
     min = addDays(min, -3)
     max = addDays(max, 4)
     const days = []
@@ -247,7 +292,7 @@ export default function App() {
       else months.push({ label, count: 1 })
     })
     return { days, months }
-  }, [scheduled, today])
+  }, [scheduled, projected, today])
 
   // The table is for working through the book, so order it by the date being
   // entered rather than by the computed start the board sorts on. The order is
@@ -295,6 +340,7 @@ export default function App() {
   const sel = scheduled.find((j) => j.id === selected)
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
   const selPart = sel ? partsById.get(sel.partId) : null
+  const selProj = sel ? projById.get(sel.id) : null
   // A unit whose numbers have been tuned away from its part number's standard.
   const selDrift = selPart && (selPart.description !== sel.desc
     || OPS.some((o) => selPart[`${o.key}_days`] !== sel[o.key]))
@@ -337,8 +383,14 @@ export default function App() {
             Level to capacity
           </label>
           <div><b>{scheduled.length}</b> units in plan</div>
-          <div className={atRisk ? 'bad' : ''}><b>{atRisk}</b> {leveled ? 'projected late' : 'behind required start'}</div>
+          {!trackingEnabled && (
+            <div className={atRisk ? 'bad' : ''}><b>{atRisk}</b> {leveled ? 'projected late' : 'behind required start'}</div>
+          )}
           <div className={overDays ? 'bad' : ''}><b>{overDays}</b> overloaded station-days</div>
+          {trackingEnabled && (<>
+            <div className={slipping ? 'bad' : ''}><b>{slipping}</b> slipping</div>
+            <div><b>{onFloor}</b> on the floor</div>
+          </>)}
           {(daysOff || daysOn) ? (
             <div><b>{daysOff}</b> closed{daysOn ? <> · <b>{daysOn}</b> extra</> : null}</div>
           ) : null}
@@ -355,6 +407,7 @@ export default function App() {
         {OPS.map((o) => <div key={o.key}><span className="chip" style={{ background: o.color }} />{o.label}</div>)}
         <div><span className="chip todaychip" />Today</div>
         <div>▼ Delivery</div>
+        {trackingEnabled && <div><span className="lanekey" />Plan over projection</div>}
         <div><span className="chip offchip" />Shop closed</div>
         {calendarEnabled
           ? <div className="hint">Click any date to close or open that day</div>
@@ -382,7 +435,7 @@ export default function App() {
 
           {scheduled.map((j) => (
             <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
-              pn={partsById.get(j.partId)?.part_number}
+              pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
               selected={selected === j.id}
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
@@ -397,7 +450,8 @@ export default function App() {
       </div>
       </>) : (
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
-          onSave={saveJob} onApplyPart={applyPart} onResort={resortTable} />
+          onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
+          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} />
       )}
 
       {sel ? (
@@ -423,6 +477,38 @@ export default function App() {
               <input className="num" type="number" min="1" value={sel[o.key]}
                 onChange={(e) => saveJob(sel.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} /></div>
           ))}
+          {trackingEnabled && (
+            <div className="stagebox">
+              <div className="field"><span>Stage</span>
+                <select value={sel.stage || 'none'} onChange={(e) => setStage(sel, e.target.value)}>
+                  {['none', 'fab', 'paint', 'asm', 'done'].map((k) => (
+                    <option key={k} value={k}>{STAGE_LABEL[k]}</option>
+                  ))}
+                </select>
+              </div>
+              {sel.stage && sel.stage !== 'none' && sel.stage !== 'done' && (
+                <>
+                  <div className="field"><span>Days left on {STAGE_LABEL[sel.stage].toLowerCase()}</span>
+                    <input className="num" type="number" min="0"
+                      value={sel.daysLeft == null ? sel[sel.stage] : sel.daysLeft}
+                      onChange={(e) => saveJob(sel.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
+                  </div>
+                  <div className="stageline">
+                    {selProj && selProj.spent > sel[sel.stage]
+                      ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
+                      : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
+                  </div>
+                </>
+              )}
+              {sel.stage !== 'done' && (
+                <div className="btnrow">
+                  <button className="btn" onClick={() => advanceStage(sel)}>
+                    Move to {STAGE_LABEL[nextStage(sel.stage || 'none')].toLowerCase()}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {selDrift && (
             <div className="driftline">
               Tuned away from {selPart.part_number}'s standard
@@ -491,6 +577,7 @@ export default function App() {
       )}
       {showPassword && <ChangePassword email={session.user.email} onClose={() => setShowPassword(false)} />}
       {scheduleError && <div className="notice bad">Couldn't build the schedule: {scheduleError}</div>}
+      {projectError && <div className="notice bad">Couldn't project remaining work: {projectError}</div>}
       {error && status === 'ready' && <div className="notice bad">Last change didn't save: {error}</div>}
     </div>
   )
@@ -535,7 +622,7 @@ function SignIn() {
   )
 }
 
-function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort }) {
+function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance }) {
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // Tabbing out of a date crosses every other field before reaching the next
   // one, which is the wrong shape for working down the book. Enter jumps
@@ -548,9 +635,13 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort 
     if (next) next.focus()
     else e.currentTarget.blur()
   }
-  const status = (j) => (j.late
-    ? { text: j.lateDays ? `${j.lateDays}d late` : `${Math.abs(j.slack)}d behind`, bad: true }
-    : { text: `${j.slack}d slack`, bad: false })
+  const variance = (p) => {
+    if (!p) return { text: '—', cls: '' }
+    if (p.complete) return { text: 'complete', cls: 'good' }
+    if (p.variance > 0) return { text: `+${p.variance}d late`, cls: 'bad' }
+    if (p.variance < 0) return { text: `${Math.abs(p.variance)}d slack`, cls: 'good' }
+    return { text: 'on target', cls: '' }
+  }
 
   return (
     <div className="tablewrap">
@@ -564,29 +655,59 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort 
           <tr>
             <th className="w-unit">Unit</th>
             <th className="w-date">Target date</th>
+            {tracking && <th className="w-stage">Stage</th>}
+            {tracking && <th className="w-num">Spent</th>}
+            {tracking && <th className="w-num">Left</th>}
+            <th className="w-calc">Projected</th>
+            <th className="w-calc">Variance</th>
             {partsEnabled && <th className="w-pn">Part number</th>}
             <th>Description</th>
             {OPS.map((o) => <th key={o.key} className="w-num">{SHORT[o.key]}</th>)}
-            <th className="w-calc">Fab starts</th>
-            <th className="w-calc">Status</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((j, i) => {
-            const st = status(j)
+            const p = projById.get(j.id)
+            const live = j.stage || 'none'
+            const planned = live === 'none' || live === 'done' ? 0 : j[live]
+            const over = planned > 0 && p && p.spent > planned
+            const vr = variance(p)
             return (
-              <tr key={j.id} className={j.late ? 'late' : ''}>
+              <tr key={j.id} className={p && p.slipping ? 'late' : ''}>
                 <td><input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} /></td>
                 <td>
                   <input type="date" data-daterow={i} value={isoDate(j.delivery)}
                     onKeyDown={toNextDate}
                     onChange={(e) => e.target.value && onSave(j.id, { delivery: parseDate(e.target.value) })} />
                 </td>
+                {tracking && (
+                  <td>
+                    <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
+                      title={live === 'done' ? 'Complete' : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`}>
+                      <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
+                    </button>
+                  </td>
+                )}
+                {tracking && (
+                  <td className={`calc ${over ? 'bad' : ''}`}>
+                    {planned ? `${p.spent}/${planned}${over ? ' ⚠' : ''}` : '—'}
+                  </td>
+                )}
+                {tracking && (
+                  <td>
+                    {planned
+                      ? <input type="number" min="0" value={j.daysLeft == null ? planned : j.daysLeft}
+                          onChange={(e) => onSave(j.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
+                      : <span className="calc">—</span>}
+                  </td>
+                )}
+                <td className="calc">{p && p.projectedEnd ? fmt(p.projectedEnd) : '—'}</td>
+                <td className={`calc ${vr.cls}`}>{vr.text}</td>
                 {partsEnabled && (
                   <td>
                     <select value={j.partId || ''} onChange={(e) => onApplyPart(j.id, e.target.value)}>
                       <option value="">—</option>
-                      {parts.map((p) => <option key={p.id} value={p.id}>{p.part_number}</option>)}
+                      {parts.map((p2) => <option key={p2.id} value={p2.id}>{p2.part_number}</option>)}
                     </select>
                   </td>
                 )}
@@ -597,8 +718,6 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort 
                       onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />
                   </td>
                 ))}
-                <td className="calc">{fmt(j.mustStart)}</td>
-                <td className={`calc ${st.bad ? 'bad' : ''}`}>{st.text}</td>
               </tr>
             )
           })}
@@ -681,11 +800,16 @@ function ChangePassword({ email, onClose }) {
   )
 }
 
-function Row({ j, days, dayIndex, todayT, cal, pn, selected, onSelect }) {
+const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
+
+function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect }) {
   return (
     <>
       <div className={`rowlabel ${selected ? 'sel' : ''}`} onClick={onSelect}>
-        <div className="unit">{j.unit}{j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}</div>
+        <div className="unit">{j.unit}
+          {tracking && proj && proj.slipping && <span className="flag">+{proj.variance}d</span>}
+          {!tracking && j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}
+        </div>
         <div className="desc" title={`${pn ? `${pn} · ` : ''}${j.desc ? `${j.desc} · ` : ''}deliver ${fmt(j.delivery)}`}>
           {pn && <span className="pntag">{pn}</span>}{j.desc ? `${j.desc} · ` : ''}deliver {fmt(j.delivery)}
         </div>
@@ -696,12 +820,22 @@ function Row({ j, days, dayIndex, todayT, cal, pn, selected, onSelect }) {
             <div key={i} className={`cell ${!cal.isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
           ))}
         </div>
+        {/* upper lane: the plan the unit was sold on */}
         {OPS.map((o) => {
           const s = j.spans[o.key]
           const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          return <div key={o.key} className={`bar ${j.late && o.key === 'fab' ? 'latefab' : ''}`}
-            title={`${o.label}: ${fmt(s.start)} – ${fmt(s.end)}`}
-            style={{ left: x + 1, width: w - 3, background: o.color }} />
+          return <div key={o.key} className={`bar plan ${j.late && o.key === 'fab' ? 'latefab' : ''}`}
+            title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
+            style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color }} />
+        })}
+        {/* lower lane: where the remaining work actually lands */}
+        {tracking && proj && (underway(j) || proj.slipping) && OPS.map((o) => {
+          const s = proj.spans[o.key]
+          if (!s) return null
+          const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
+          return <div key={`p-${o.key}`} className={`bar proj ${proj.slipping ? 'slip' : ''}`}
+            title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
+            style={{ left: x + 1, width: w - 3, background: proj.slipping ? '#B3382E' : o.color }} />
         })}
         <div className="delmark" style={{ left: dayIndex(j.delivery) * COL + COL / 2 }} />
       </div>
@@ -796,8 +930,31 @@ function Style() {
     .cell { border-top: 1px solid #E4E8EA; border-left: 1px solid #F0F2F3; height: 46px; position: relative; }
     .cell.we { background: #F5F6F7; }
     .cell.todaycol::after, .lcell.todaycol::after { content: ''; position: absolute; inset: 0; border-left: 2px solid #1B2126; }
+    /* two lanes: the plan on top, where the work actually lands beneath it */
     .bar { position: absolute; top: 12px; height: 20px; border-radius: 3px; }
+    .bar.plan { top: 7px; height: 13px; border: 1px solid; }
+    .bar.proj { top: 24px; height: 13px; }
     .bar.latefab { outline: 2px solid #B3382E; }
+    .lanekey { width: 14px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -2px;
+      background: linear-gradient(#E3EAF2 0 50%, #44688F 50% 100%); border: 1px solid #44688F; }
+    /* stage chips */
+    .chip.none, .chip.fab, .chip.paint, .chip.asm, .chip.done {
+      display: inline-flex; align-items: center; gap: 5px; width: auto; height: auto; border-radius: 3px;
+      font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 3px 7px; }
+    .chip.none i, .chip.fab i, .chip.paint i, .chip.asm i, .chip.done i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+    .chip.none { background: #EEF0F1; color: #5B6670; } .chip.none i { background: #9AA4AB; }
+    .chip.fab { background: #E3EAF2; color: #33557A; } .chip.fab i { background: #44688F; }
+    .chip.paint { background: #F5E8DA; color: #96581F; } .chip.paint i { background: #C0722F; }
+    .chip.asm { background: #E1EEE6; color: #2D6044; } .chip.asm i { background: #3E7C59; }
+    .chip.done { background: #E1EEE6; color: #2D6044; } .chip.done i { background: #3E7C59; }
+    .stagebtn { border: 0; background: none; padding: 0; cursor: pointer; font-family: inherit; }
+    .stagebtn:disabled { cursor: default; }
+    .stagebtn:focus-visible { outline: 2px solid #44688F; outline-offset: 2px; border-radius: 3px; }
+    .stagebox { border: 1px solid #E4E8EA; border-radius: 5px; padding: 12px 14px 4px; margin: 14px 0 4px; background: #F9FAFB; }
+    .stageline { font-size: 12px; color: #5B6670; margin: -2px 0 10px; }
+    .stageline .bad { color: #B3382E; font-weight: 600; }
+    .orders td.calc.good { color: #2D6044; }
+    .orders .w-stage { width: 118px; }
     .delmark { position: absolute; top: 8px; width: 2px; height: 28px; background: #1B2126; }
     .delmark::after { content: ''; position: absolute; top: -4px; left: -3px; border: 4px solid transparent; border-top: 6px solid #1B2126; }
     .secthead { position: sticky; left: 0; z-index: 2; background: #F6F8F9; border-top: 2px solid #C6CDD1; border-right: 1px solid #D4D9DC; font-size: 11px; font-weight: 700; color: #3A434B; padding: 8px 10px 6px; white-space: nowrap; }
