@@ -33,15 +33,18 @@ export default function App() {
   const [view, setView] = useState('board')
   // False until the tracking columns exist on jobs, so the board still runs without them.
   const [trackingEnabled, setTrackingEnabled] = useState(true)
+  // Closed stations, planned against actual. Empty until a station is closed.
+  const [stageLog, setStageLog] = useState([])
 
   const load = useCallback(async () => {
     if (!supabase) return
     try {
-      const [jr, cr, dr, pr] = await Promise.all([
+      const [jr, cr, dr, pr, sr] = await Promise.all([
         supabase.from('jobs').select('*').order('delivery_date'),
         supabase.from('station_caps').select('*'),
         supabase.from('day_overrides').select('*'),
         supabase.from('part_numbers').select('*').order('part_number'),
+        supabase.from('stage_log').select('*'),
       ])
       if (jr.error || cr.error) {
         setStatus('error')
@@ -69,6 +72,7 @@ export default function App() {
       // The catalog is optional the same way, so the board still runs without it.
       setPartsEnabled(!pr.error)
       setParts(pr.error ? [] : (pr.data || []))
+      setStageLog(sr.error ? [] : (sr.data || []))
       setStatus('ready')
     } catch (err) {
       setStatus('error')
@@ -140,6 +144,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'station_caps' }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'day_overrides' }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stage_log' }, scheduleReload)
       .subscribe()
     return () => { supabase.removeChannel(ch); clearTimeout(reloadTimer.current) }
   }, [load, scheduleReload, userId])
@@ -435,10 +440,10 @@ export default function App() {
         <div className="title">Shop schedule <span>· scheduled backward from delivery</span></div>
         <div className="stats">
           <div className="views">
-            {['board', 'table'].map((v) => (
+            {['board', 'table', ...(trackingEnabled ? ['report'] : [])].map((v) => (
               <button key={v} className={view === v ? 'on' : ''}
                 onClick={() => { setView(v); setSelected(null) }}>
-                {v === 'board' ? 'Board' : 'Table'}
+                {v === 'board' ? 'Board' : v === 'table' ? 'Table' : 'Report'}
               </button>
             ))}
           </div>
@@ -512,13 +517,15 @@ export default function App() {
           ))}
         </div>
       </div>
-      </>) : (
+      </>) : view === 'table' ? (
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
-          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} />
+          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today} />
+      ) : (
+        <StageReport log={stageLog} jobs={jobs} partsById={partsById} />
       )}
 
-      {sel ? (
+      {view !== 'report' && (sel ? (
         <div className="panel">
           <h3>{sel.unit}{sel.desc ? ` — ${sel.desc}` : ''}</h3>
           <div className="field"><span>Unit</span>
@@ -552,15 +559,22 @@ export default function App() {
               </div>
               {sel.stage && sel.stage !== 'none' && sel.stage !== 'done' && (
                 <>
+                  <div className="field"><span>Went into {STAGE_LABEL[sel.stage].toLowerCase()}</span>
+                    <input type="date" max={isoDate(today)}
+                      value={sel.stageStarted ? isoDate(sel.stageStarted) : ''}
+                      onChange={(e) => saveJob(sel.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
+                  </div>
                   <div className="field"><span>Days left on {STAGE_LABEL[sel.stage].toLowerCase()}</span>
                     <input className="num" type="number" min="0"
                       value={sel.daysLeft == null ? sel[sel.stage] : sel.daysLeft}
                       onChange={(e) => saveJob(sel.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
                   </div>
                   <div className="stageline">
-                    {selProj && selProj.spent > sel[sel.stage]
-                      ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
-                      : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
+                    {!sel.stageStarted
+                      ? <span>Set the date it went in and the days spent will count themselves.</span>
+                      : selProj && selProj.spent > sel[sel.stage]
+                        ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
+                        : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
                   </div>
                 </>
               )}
@@ -611,8 +625,8 @@ export default function App() {
               </button>
             : <span className="hint bad">Part numbers need the <code>part_numbers</code> table — see supabase/schema.sql</span>}
         </div>
-      )}
-      {showParts && partsEnabled && (
+      ))}
+      {showParts && partsEnabled && view !== 'report' && (
         <div className="panel wide">
           <h3>Part numbers</h3>
           <p className="sub">The standard build for each model. Picking one when you add a unit copies
@@ -686,7 +700,7 @@ function SignIn() {
   )
 }
 
-function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance }) {
+function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance, today }) {
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // Tabbing out of a date crosses every other field before reaching the next
   // one, which is the wrong shape for working down the book. Enter jumps
@@ -720,7 +734,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
             <th className="w-unit">Unit</th>
             <th className="w-date">Target date</th>
             {tracking && <th className="w-stage">Stage</th>}
-            {tracking && <th className="w-num">Spent</th>}
+            {tracking && <th className="w-since">In stage since</th>}
             {tracking && <th className="w-num">Left</th>}
             <th className="w-calc">Projected</th>
             <th className="w-calc">Variance</th>
@@ -753,8 +767,18 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                   </td>
                 )}
                 {tracking && (
-                  <td className={`calc ${over ? 'bad' : ''}`}>
-                    {planned ? `${p.spent}/${planned}${over ? ' ⚠' : ''}` : '—'}
+                  <td>
+                    {planned ? (
+                      <div className="since">
+                        <input type="date" max={isoDate(today)}
+                          value={j.stageStarted ? isoDate(j.stageStarted) : ''}
+                          title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
+                          onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
+                        <span className={`sincedays ${over ? 'bad' : ''}`}>
+                          {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}` : `not set · ${planned} d booked`}
+                        </span>
+                      </div>
+                    ) : <span className="calc">—</span>}
                   </td>
                 )}
                 {tracking && (
@@ -860,6 +884,162 @@ function ChangePassword({ email, onClose }) {
           </>
         )}
       </form>
+    </div>
+  )
+}
+
+// How each closed station actually went against what was booked for it.
+function StageReport({ log, jobs, partsById }) {
+  const rows = useMemo(() => {
+    const byJob = new Map(jobs.map((j) => [j.id, j]))
+    return (log || []).map((l) => {
+      const j = byJob.get(l.job_id)
+      const part = j ? partsById.get(j.partId) : null
+      return {
+        key: `${l.job_id}-${l.stage}`,
+        stage: l.stage,
+        unit: j ? j.unit : '—',
+        // the catalogue entry when there is one; the unit's own description is
+        // the next best thing, since that is where the model name lives today
+        model: (part && part.part_number) || (j && j.desc) || '—',
+        planned: l.planned_days,
+        actual: l.actual_days,
+        diff: l.actual_days - l.planned_days,
+        closed: l.closed_on ? parseDate(l.closed_on) : null,
+      }
+    }).sort((a, b) => (b.closed || 0) - (a.closed || 0))
+  }, [log, jobs, partsById])
+
+  const roll = (rs) => {
+    const planned = rs.reduce((n, r) => n + r.planned, 0)
+    const actual = rs.reduce((n, r) => n + r.actual, 0)
+    return { n: rs.length, planned, actual, diff: actual - planned,
+      pct: planned ? Math.round((actual - planned) / planned * 100) : 0 }
+  }
+  const overall = roll(rows)
+  const byStation = OPS.map((o) => ({ op: o, ...roll(rows.filter((r) => r.stage === o.key)) }))
+  const byModel = useMemo(() => {
+    const names = [...new Set(rows.map((r) => r.model))]
+    return names.map((model) => {
+      const rs = rows.filter((r) => r.model === model)
+      const per = {}
+      OPS.forEach((o) => {
+        const sub = rs.filter((r) => r.stage === o.key)
+        per[o.key] = sub.length ? { n: sub.length, ...roll(sub) } : null
+      })
+      return { model, per, ...roll(rs) }
+    }).sort((a, b) => b.n - a.n || b.pct - a.pct)
+  }, [rows])
+
+  const pct = (v) => (v > 0 ? `+${v}%` : v < 0 ? `${v}%` : 'on estimate')
+  const cls = (v) => (v > 5 ? 'bad' : v < -5 ? 'good' : '')
+  const avg = (t, n) => (n ? (t / n).toFixed(t / n % 1 ? 1 : 0) : '—')
+
+  if (rows.length === 0) return (
+    <div className="reportwrap">
+      <div className="empty">
+        <h3>Nothing closed out yet</h3>
+        <p>Every time a station is closed with <strong>Move to …</strong>, the days it was
+          booked for and the days it actually took are recorded here. After a dozen trailers
+          this answers whether an 80-ton RGN really takes twelve fab days.</p>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="reportwrap">
+      <div className="rephead">
+        <div><b>{overall.n}</b> stations closed</div>
+        <div className={cls(overall.pct)}><b>{pct(overall.pct)}</b> against estimate overall</div>
+        <div><b>{overall.actual - overall.planned > 0 ? '+' : ''}{overall.diff}</b> working days</div>
+      </div>
+
+      <div className="repsect">
+        <h3>By station</h3>
+        <div className="tablescroll">
+          <table className="report">
+            <thead><tr><th>Station</th><th className="r">Closed</th><th className="r">Booked</th>
+              <th className="r">Took</th><th>Against estimate</th></tr></thead>
+            <tbody>
+              {byStation.map(({ op, n, planned, actual, pct: p }) => (
+                <tr key={op.key}>
+                  <td><span className="chip2"><i style={{ background: op.color }} />{op.label}</span></td>
+                  <td className="r n">{n || '—'}</td>
+                  <td className="r n">{n ? `${avg(planned, n)} d` : '—'}</td>
+                  <td className="r n">{n ? `${avg(actual, n)} d` : '—'}</td>
+                  <td>{n ? (
+                    <div className="meter">
+                      <span className="mtrack">
+                        <span className="mplan" />
+                        <span className="mact" style={{
+                          width: `${Math.min(200, planned ? actual / planned * 100 : 0) / 2}%`,
+                          background: p > 5 ? '#B3382E' : op.color,
+                        }} />
+                      </span>
+                      <span className={`mnum ${cls(p)}`}>{pct(p)}</span>
+                    </div>
+                  ) : <span className="muted">no closures yet</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="foot">Averages per closure. The rule on each bar is the booked estimate; the
+          fill is what it actually took, so a fill past the rule is an overrun.</p>
+      </div>
+
+      <div className="repsect">
+        <h3>By model</h3>
+        <div className="tablescroll">
+          <table className="report">
+            <thead><tr><th>Model</th><th className="r">Closed</th>
+              {OPS.map((o) => <th key={o.key} className="r">{SHORT[o.key]} booked → took</th>)}
+              <th className="r">Overall</th></tr></thead>
+            <tbody>
+              {byModel.map((m) => (
+                <tr key={m.model}>
+                  <td className="strong">{m.model}</td>
+                  <td className="r n">{m.n}</td>
+                  {OPS.map((o) => {
+                    const c = m.per[o.key]
+                    return <td key={o.key} className="r n">
+                      {c ? <span className={cls(c.pct)}>{avg(c.planned, c.n)} → {avg(c.actual, c.n)} d</span> : '—'}
+                    </td>
+                  })}
+                  <td className={`r n ${cls(m.pct)}`}>{pct(m.pct)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="foot">Grouped by part number where a unit has one, otherwise by its description.</p>
+      </div>
+
+      <div className="repsect">
+        <h3>Recent closures</h3>
+        <div className="tablescroll">
+          <table className="report">
+            <thead><tr><th>Unit</th><th>Model</th><th>Station</th><th className="r">Booked</th>
+              <th className="r">Took</th><th className="r">Difference</th><th className="r">Closed</th></tr></thead>
+            <tbody>
+              {rows.slice(0, 25).map((r) => (
+                <tr key={r.key}>
+                  <td className="strong">{r.unit}</td>
+                  <td className="muted">{r.model}</td>
+                  <td><span className={`chip ${r.stage}`}><i />{STAGE_LABEL[r.stage]}</span></td>
+                  <td className="r n">{r.planned} d</td>
+                  <td className="r n">{r.actual} d</td>
+                  <td className={`r n ${r.diff > 0 ? 'bad' : r.diff < 0 ? 'good' : ''}`}>
+                    {r.diff > 0 ? `+${r.diff}` : r.diff || '0'} d
+                  </td>
+                  <td className="r n muted">{r.closed ? fmt(r.closed) : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {rows.length > 25 && <p className="foot">Showing the 25 most recent of {rows.length}.</p>}
+      </div>
     </div>
   )
 }
@@ -1019,6 +1199,41 @@ function Style() {
     .stageline .bad { color: #B3382E; font-weight: 600; }
     .orders td.calc.good { color: #2D6044; }
     .orders .w-stage { width: 118px; }
+    .orders .w-since { width: 152px; }
+    .since { display: flex; flex-direction: column; gap: 1px; }
+    .since input { padding-block: 4px; }
+    .sincedays { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; padding-left: 8px; }
+    .sincedays.bad { color: #B3382E; font-weight: 600; }
+    /* stage report */
+    .reportwrap { margin: 0 24px 24px; display: flex; flex-direction: column; gap: 18px; }
+    .rephead { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 14px 18px; font-size: 13px; color: #3A434B; }
+    .rephead b { font-size: 17px; font-variant-numeric: tabular-nums; }
+    .rephead .bad b { color: #B3382E; } .rephead .good b { color: #2D6044; }
+    .repsect { display: flex; flex-direction: column; gap: 8px; }
+    .repsect h3 { margin: 0; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #5B6670; }
+    .repsect .foot { margin: 0; font-size: 11px; color: #7A848C; line-height: 1.5; max-width: 76ch; }
+    table.report { border-collapse: collapse; width: 100%; font-size: 13px; background: #FFF; }
+    table.report th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; color: #7A848C; padding: 9px 12px; background: #F6F8F9; border-bottom: 1px solid #D4D9DC; white-space: nowrap; }
+    table.report td { padding: 9px 12px; border-bottom: 1px solid #E4E8EA; white-space: nowrap; }
+    table.report tr:last-child td { border-bottom: 0; }
+    table.report th.r, table.report td.r { text-align: right; }
+    table.report td.n { font-variant-numeric: tabular-nums; }
+    table.report td.strong { font-weight: 700; }
+    table.report td.muted, .muted { color: #7A848C; }
+    table.report .bad { color: #B3382E; font-weight: 600; }
+    table.report .good { color: #2D6044; font-weight: 600; }
+    .chip2 { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+    .chip2 i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    /* booked vs took: the rule is the estimate, the fill is reality */
+    .meter { display: flex; align-items: center; gap: 10px; min-width: 210px; }
+    .mtrack { position: relative; flex: 1; height: 9px; background: #EEF0F1; border-radius: 5px; overflow: hidden; min-width: 120px; }
+    .mplan { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 2px; background: #1B2126; z-index: 1; }
+    .mact { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; }
+    .mnum { font-size: 11px; font-variant-numeric: tabular-nums; color: #5B6670; min-width: 74px; text-align: right; }
+    .mnum.bad { color: #B3382E; font-weight: 600; } .mnum.good { color: #2D6044; font-weight: 600; }
+    .empty { background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 26px 24px; max-width: 620px; }
+    .empty h3 { margin: 0 0 8px; font-size: 15px; font-weight: 700; text-transform: none; letter-spacing: 0; color: #1B2126; }
+    .empty p { margin: 0; font-size: 13px; color: #5B6670; line-height: 1.6; }
     .delmark { position: absolute; top: 8px; width: 2px; height: 28px; background: #1B2126; }
     .delmark::after { content: ''; position: absolute; top: -4px; left: -3px; border: 4px solid transparent; border-top: 6px solid #1B2126; }
     .secthead { position: sticky; left: 0; z-index: 2; background: #F6F8F9; border-top: 2px solid #C6CDD1; border-right: 1px solid #D4D9DC; font-size: 11px; font-weight: 700; color: #3A434B; padding: 8px 10px 6px; white-space: nowrap; }
