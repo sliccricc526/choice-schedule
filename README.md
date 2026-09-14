@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar or the part-number catalog existed, run just the `day_overrides` and `part_numbers` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog or production tracking existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 ### 2. Local dev
 ```bash
@@ -41,6 +41,24 @@ Two views of the same plan, switched from the header.
 Rows are ordered by target date but **hold their place while you type**. Re-sorting on every keystroke would slide a row out from under the cursor as soon as its date passed its neighbour's, and `Enter` would drop into a different unit than the one below. The order settles when you open the table, when units are added or removed, or when you press **Re-sort by date**.
 
 Removing a unit is still done from the board: select it and use **Remove unit**.
+
+## Production tracking
+
+The board knows three things about each unit: which station it's on (**Stage**), how many working days the shop says are left on that station (**Left**), and when that station started — which is where **Spent** comes from. Everything else is derived.
+
+- **Projected** — the unit's remaining work scheduled *forward* from today against the same station capacities. Work already on the floor can't be pushed back into the past, so a unit under way starts now. That's what makes the projection differ from the plan.
+- **Variance** — projected finish against the target date, in working days. `+3d late` means it lands three working days past its date; `4d slack` means there's that much room before it.
+
+Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days, so after a dozen trailers you can check whether an 80-ton RGN really takes twelve fab days.
+
+On the board each row carries two lanes: the plan on top (outlined), and where the remaining work actually lands underneath (solid, red when it runs past the target). The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
+
+Two things worth knowing about the semantics:
+
+- **A closed station stops consuming capacity.** That's the whole reason the projection is a separate pass rather than the existing backward schedule, which floors every operation at one day.
+- **For a unit nobody has started, Variance is "earliest possible finish vs target".** Positive means it can no longer be built in time even starting today; negative is float. That's why it reads *slack* rather than *early*.
+
+Tracking degrades gracefully: without the `stage` columns on `jobs`, the board runs exactly as it did before and the tracking columns don't appear.
 
 ## Part numbers
 

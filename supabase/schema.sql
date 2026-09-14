@@ -38,6 +38,28 @@ create table if not exists public.part_numbers (
 alter table public.jobs
   add column if not exists part_number_id uuid references public.part_numbers(id) on delete set null;
 
+-- Production tracking. `stage` is the station a unit is on now, `days_left` is
+-- what the shop says remains on that station, and `stage_started` dates it so
+-- days spent can be counted. Everything else -- projected finish, variance --
+-- is derived, so nobody types it and nobody can forget to.
+alter table public.jobs
+  add column if not exists stage text not null default 'none'
+    check (stage in ('none','fab','paint','asm','done')),
+  add column if not exists stage_started date,
+  add column if not exists days_left int check (days_left is null or days_left >= 0),
+  add column if not exists updated_at timestamptz not null default now();
+
+-- Planned against actual, kept as each station closes, so estimates can be
+-- checked against what the trailers really took.
+create table if not exists public.stage_log (
+  job_id uuid not null references public.jobs(id) on delete cascade,
+  stage text not null check (stage in ('fab','paint','asm')),
+  planned_days int not null,
+  actual_days int not null,
+  closed_on date not null default current_date,
+  primary key (job_id, stage)
+);
+
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
 -- overtime. Days with no row follow the default, so this table stays small.
@@ -64,6 +86,7 @@ alter table public.jobs enable row level security;
 alter table public.station_caps enable row level security;
 alter table public.day_overrides enable row level security;
 alter table public.part_numbers enable row level security;
+alter table public.stage_log enable row level security;
 
 create policy "jobs team access" on public.jobs
   for all to authenticated using (true) with check (true);
@@ -72,6 +95,8 @@ create policy "caps team access" on public.station_caps
 create policy "days team access" on public.day_overrides
   for all to authenticated using (true) with check (true);
 create policy "parts team access" on public.part_numbers
+  for all to authenticated using (true) with check (true);
+create policy "stage log team access" on public.stage_log
   for all to authenticated using (true) with check (true);
 
 -- Live sync between users: publish changes over realtime.

@@ -165,3 +165,110 @@ export function levelSchedule(jobs, caps, today, cal = defaultCalendar) {
   })
   return out
 }
+
+// --- Production tracking --------------------------------------------------
+// The plan says when work should happen. These say where it actually is.
+
+export const STAGES = ['none', 'fab', 'paint', 'asm', 'done']
+export const STAGE_LABEL = {
+  none: 'Not started', fab: 'Fabrication', paint: 'Paint', asm: 'Assembly', done: 'Complete',
+}
+const STAGE_AT = { fab: 0, paint: 1, asm: 2 }
+// The station that follows the one given, or 'done' after the last.
+export const nextStage = (stage) => (stage === 'none' ? 'fab'
+  : stage === 'done' ? 'done'
+  : (OPS[STAGE_AT[stage] + 1] || { key: 'done' }).key)
+
+// Work still to do, station by station. The station in progress contributes
+// whatever the shop says is left; stations after it contribute their planned
+// duration; stations already closed contribute nothing at all — which is the
+// point, since a finished operation should stop consuming capacity.
+export function remainingWork(job) {
+  const stage = job.stage || 'none'
+  if (stage === 'done') return []
+  const at = stage === 'none' ? -1 : STAGE_AT[stage]
+  const out = []
+  OPS.forEach((op, i) => {
+    if (i < at) return
+    const planned = Math.max(1, job[op.key] || 1)
+    const days = i === at
+      ? Math.max(0, job.daysLeft == null ? planned : job.daysLeft)
+      : planned
+    if (days > 0) out.push({ key: op.key, days })
+  })
+  return out
+}
+
+// Working days spent on the station in progress, counting the day it started.
+export function daysSpent(job, today, cal = defaultCalendar) {
+  const stage = job.stage || 'none'
+  if (stage === 'none' || stage === 'done' || !job.stageStarted) return 0
+  const start = strip(job.stageStarted)
+  if (start > strip(today)) return 0
+  return cal.workdaysBetween(start, today) + (cal.isWorkday(start) ? 1 : 0)
+}
+
+// Where the work actually lands: remaining work scheduled FORWARD from today
+// against the same station capacities. A unit already on the floor cannot be
+// pushed back into the past, so its remaining work starts now — that is what
+// makes this differ from the backward plan, and the difference is the slip.
+// Units under way are placed first: you don't stop a trailer mid-fab to start
+// another one.
+export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
+  const usage = { fab: {}, paint: {}, asm: {} }
+  const free = (st, d) => (usage[st][isoDate(d)] || 0) < Math.max(1, caps[st])
+  const take = (st, s, e) => {
+    let d = strip(s)
+    while (true) {
+      usage[st][isoDate(d)] = (usage[st][isoDate(d)] || 0) + 1
+      if (d.getTime() >= e.getTime()) break
+      d = cal.nextWorkday(d)
+    }
+  }
+  const forwardBlock = (st, n, earliest) => {
+    let start = cal.isWorkday(earliest) ? strip(earliest) : cal.nextWorkday(earliest)
+    for (let g = 0; g < 500; g++) {
+      let ok = true, d = strip(start), e = strip(start)
+      for (let i = 0; i < n; i++) {
+        if (!free(st, d)) { ok = false; break }
+        e = strip(d)
+        if (i < n - 1) d = cal.nextWorkday(d)
+      }
+      if (ok) return { start, end: e }
+      start = cal.nextWorkday(start)
+    }
+    return { start, end: start }
+  }
+
+  const underway = (j) => { const s = j.stage || 'none'; return s !== 'none' && s !== 'done' }
+  const ordered = [...jobs].sort((a, b) =>
+    (underway(b) - underway(a)) || (a.delivery - b.delivery) || String(a.unit).localeCompare(String(b.unit)))
+
+  const out = []
+  ordered.forEach((job) => {
+    const work = remainingWork(job)
+    const due = cal.onOrBeforeWorkday(job.delivery)
+    const spans = {}
+    let cursor = today, end = null
+    work.forEach(({ key, days }) => {
+      const blk = forwardBlock(key, days, cursor)
+      spans[key] = blk
+      take(key, blk.start, blk.end)
+      cursor = cal.nextWorkday(blk.end)
+      end = blk.end
+    })
+    const complete = work.length === 0
+    out.push({
+      ...job,
+      spans,
+      due,
+      projectedEnd: end,                                   // null once every station is closed
+      complete,
+      variance: complete ? 0 : cal.workdaysBetween(due, end),   // + late, - early
+      slipping: !complete && end > due,
+      daysRemaining: work.reduce((n, w) => n + w.days, 0),
+      spent: daysSpent(job, today, cal),
+    })
+  })
+  return out
+}
