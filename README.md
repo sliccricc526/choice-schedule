@@ -17,6 +17,8 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 
 If you set this up before the shop calendar, the part-number catalog or production tracking existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
+The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on`: without it, closing a station still records the days it took, but the stage-date columns stay empty and the report says so.
+
 ### 2. Local dev
 ```bash
 npm install
@@ -53,19 +55,24 @@ The board knows three things about each unit: which station it's on (**Stage**),
 - **Projected** — the unit's remaining work scheduled *forward* from today against the same station capacities. Work already on the floor can't be pushed back into the past, so a unit under way starts now. That's what makes the projection differ from the plan.
 - **Variance** — projected finish against the target date, in working days. `+3d late` means it lands three working days past its date; `4d slack` means there's that much room before it.
 
-Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days — **unless the station has no start date**, in which case nothing is recorded. The days it took are unknown, not zero, and logging zero would teach the report that the station takes no time at all.
+Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days, and with the dates behind them — the day the unit went into the station and the day it came out — **unless the station has no start date**, in which case nothing is recorded. The days it took are unknown, not zero, and logging zero would teach the report that the station takes no time at all.
 
 That is the normal case for units already on the floor when tracking begins: you often can't say when their current station started. Leave the date blank rather than guessing. Those units go uncounted for the station they're on now and start counting at the next one, which does begin under the app.
 
 ### The report
 
-The **Report** view reads that log back three ways:
+The **Report** view reads that log back four ways:
 
 - **By station** — how fabrication, paint and assembly each run against their estimates on average. The rule on each bar is what was booked and the fill is what it took, so a fill past the rule is an overrun.
 - **By model** — booked against took, per station, grouped by part number (or by the unit's description where it has no part number). This is the one that answers whether an 80-ton RGN really takes twelve fab days.
-- **Recent closures** — the last 25 stations closed, with the difference on each.
+- **Stage dates — planned against actual** — every unit's three stations with planned start, planned finish, actual start and actual finish side by side, and the working-day difference on each end. A station still open shows where the projection now puts its finish, marked `proj`, rather than a blank. The same four dates are in the unit panel on the board and table views, for one unit at a time.
+- **Recent closures** — the last 25 stations closed, with the difference on each and the dates it ran between.
 
 Percentages are computed on totals rather than averaged, so a long station counts for more than a short one. A model's figures follow the part number a unit carries *now*, so re-tagging a unit moves its history with it.
+
+The *planned* dates on the stage-date table are the plain just-in-time plan — straight back from the delivery date, capacity ignored. That is deliberate, and it is **not** the levelled plan the board draws when **Level to capacity** is on. Levelling books no work earlier than today, so for a station that has already run it would invent a planned date in the future and the comparison would be meaningless. Just-in-time is defined in the past as well as the future: the latest that station could have run and still made delivery. It also means the table doesn't shift under you when the levelling toggle is flipped. A negative start difference therefore reads as *the station opened earlier than it strictly had to*, not as a problem.
+
+Actual dates are fixed at the moment a station closes and never recomputed. Stations closed before those two columns existed keep whatever the log has — usually a finish date and no start — and show `—` rather than a guess.
 
 On the board each row carries two lanes: the plan on top (outlined), and where the remaining work actually lands underneath (solid, red when it runs past the target). The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
 

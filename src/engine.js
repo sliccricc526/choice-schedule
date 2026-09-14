@@ -272,3 +272,44 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
   })
   return out
 }
+
+// --- Planned against actual dates -----------------------------------------
+// The plan says when a station should run; the stage log says when it really
+// did. This lines the two up station by station for one unit, so the four
+// dates read side by side.
+
+export const STAGE_RANK = { none: 0, fab: 1, paint: 2, asm: 3, done: 4 }
+
+// `plan` is the unit's planned spans, `log` its closed stations keyed by stage
+// ({ started, finished, plannedDays, actualDays }), `proj` its forward
+// projection. Anything not known comes back null rather than guessed: a
+// station closed before the dates were kept has no actual start, and saying so
+// is better than inventing one.
+export function stageDates(job, plan, log, proj, cal = defaultCalendar) {
+  const stage = job.stage || 'none'
+  const rank = STAGE_RANK[stage] || 0
+  const span = (a, b) => (a && b ? cal.workdaysBetween(a, b) : null)
+  return OPS.map((op, i) => {
+    const planned = (plan && plan[op.key]) || null
+    const rec = (log && log[op.key]) || null
+    const active = stage === op.key
+    // Closed once it is logged, or once the unit has moved past it — a stage
+    // set by hand leaves no log row, but the station is still behind the unit.
+    const state = rec || rank > i + 1 ? 'closed' : active ? 'active' : 'pending'
+    const start = (rec && rec.started) || (active ? job.stageStarted || null : null)
+    const finish = (rec && rec.finished) || null
+    return {
+      key: op.key,
+      label: op.label,
+      state,
+      plan: planned,
+      actual: { start, finish },
+      // Where the work is now expected to land, for stations not yet closed.
+      projected: (!rec && proj && proj.spans && proj.spans[op.key]) || null,
+      startVar: span(planned && planned.start, start),
+      finishVar: span(planned && planned.end, finish),
+      plannedDays: rec ? rec.plannedDays : Math.max(1, job[op.key] || 1),
+      actualDays: rec ? rec.actualDays : null,
+    }
+  })
+}

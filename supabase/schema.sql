@@ -60,6 +60,17 @@ create table if not exists public.stage_log (
   primary key (job_id, stage)
 );
 
+-- The dates behind those durations: when the station really opened and when it
+-- really closed. `closed_on` only ever said when the row was written, which is
+-- the same day for a station closed on time and a lie for one caught up on
+-- later. Rows written before these columns existed keep null starts -- unknown,
+-- not assumed.
+alter table public.stage_log
+  add column if not exists started_on date,
+  add column if not exists finished_on date;
+
+update public.stage_log set finished_on = closed_on where finished_on is null;
+
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
 -- overtime. Days with no row follow the default, so this table stays small.
@@ -104,6 +115,9 @@ alter publication supabase_realtime add table public.jobs;
 alter publication supabase_realtime add table public.station_caps;
 alter publication supabase_realtime add table public.day_overrides;
 alter publication supabase_realtime add table public.part_numbers;
+-- Without this a station closed on one screen leaves the report stale on every
+-- other one until the page is reloaded.
+alter publication supabase_realtime add table public.stage_log;
 
 -- Optional starter data (delete these rows once real units are in):
 insert into public.jobs (unit, description, delivery_date, fab_days, paint_days, asm_days) values
