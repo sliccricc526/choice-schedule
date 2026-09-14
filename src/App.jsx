@@ -7,6 +7,7 @@ import {
 
 const COL = 26
 const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
+const STAGE_RANK = { none: 0, fab: 1, paint: 2, asm: 3, done: 4 }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
 export default function App() {
@@ -338,6 +339,7 @@ export default function App() {
     catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
   }, [jobs, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
+  const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
   const slipping = projected.filter((p) => p.slipping).length
   const onFloor = jobs.filter(underway).length
 
@@ -370,16 +372,64 @@ export default function App() {
   // Enter would drop into a different unit than the one below. It settles again
   // when the table is opened, when units are added or removed, or on request.
   const [tableOrder, setTableOrder] = useState([])
+  const [sort, setSort] = useState({ key: 'delivery', dir: 1 })
+
+  // Sorting reads the projection and the catalogue as well as the unit itself,
+  // and runs from an effect, so the current values go through refs.
   const scheduledRef = useRef(scheduled)
+  const sortRef = useRef(sort)
+  const projRef = useRef(projById)
+  const partsRef = useRef(partsById)
   scheduledRef.current = scheduled
+  sortRef.current = sort
+  projRef.current = projById
+  partsRef.current = partsById
+
   const resortTable = useCallback(() => {
-    setTableOrder(scheduledRef.current
-      .slice()
-      .sort((a, b) => (a.delivery - b.delivery) || a.unit.localeCompare(b.unit))
-      .map((j) => j.id))
+    const { key, dir } = sortRef.current
+    const value = (j) => {
+      const p = projRef.current.get(j.id)
+      const live = j.stage || 'none'
+      switch (key) {
+        case 'unit': return j.unit || ''
+        case 'delivery': return +j.delivery
+        case 'stage': return STAGE_RANK[live]
+        case 'since': return j.stageStarted ? +j.stageStarted : null
+        case 'left': return live === 'none' || live === 'done'
+          ? null : (j.daysLeft == null ? j[live] : j.daysLeft)
+        case 'projected': return p && p.projectedEnd ? +p.projectedEnd : null
+        case 'variance': return p && !p.complete ? p.variance : null
+        // null rather than '' so an untagged unit sorts to the bottom like every
+        // other blank, instead of heading the list when sorted ascending
+        case 'part': return (partsRef.current.get(j.partId) || {}).part_number || null
+        case 'desc': return j.desc || null
+        default: return j[key]
+      }
+    }
+    setTableOrder(scheduledRef.current.slice().sort((a, b) => {
+      const va = value(a), vb = value(b)
+      // blanks sort to the bottom whichever way the column is pointing
+      if (va == null && vb == null) return 0
+      if (va == null) return 1
+      if (vb == null) return -1
+      const r = typeof va === 'string'
+        ? va.localeCompare(vb, undefined, { numeric: true, sensitivity: 'base' })
+        : va - vb
+      // work-order numbers break every tie, so the order is never arbitrary
+      return r ? r * dir : String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true })
+    }).map((j) => j.id))
   }, [])
+
   const idKey = scheduled.map((j) => j.id).sort().join(',')
-  useEffect(() => { resortTable() }, [view, idKey, resortTable])
+  useEffect(() => { resortTable() }, [view, idKey, sort, resortTable])
+
+  // Clicking the sorted column flips it. Variance and the day counts open
+  // largest-first, since "what is worst" is the reason to sort by them.
+  const sortBy = useCallback((key) => {
+    setSort((cur) => cur.key === key
+      ? { key, dir: -cur.dir }
+      : { key, dir: ['variance', 'left', 'fab', 'paint', 'asm'].includes(key) ? -1 : 1 })
+  }, [])
 
   const tableRows = useMemo(() => {
     const byId = new Map(scheduled.map((j) => [j.id, j]))
@@ -407,7 +457,6 @@ export default function App() {
   const daysOn = days.filter((d) => cal.isOverridden(d) && cal.isWorkday(d)).length
   const atRisk = scheduled.filter((j) => j.late).length
   const sel = scheduled.find((j) => j.id === selected)
-  const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
   const selPart = sel ? partsById.get(sel.partId) : null
   const selProj = sel ? projById.get(sel.id) : null
   // A unit whose numbers have been tuned away from its part number's standard.
@@ -520,7 +569,8 @@ export default function App() {
       </>) : view === 'table' ? (
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
-          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today} />
+          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today}
+          sort={sort} onSort={sortBy} />
       ) : (
         <StageReport log={stageLog} jobs={jobs} partsById={partsById} />
       )}
@@ -700,7 +750,7 @@ function SignIn() {
   )
 }
 
-function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance, today }) {
+function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance, today, sort, onSort }) {
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // Tabbing out of a date crosses every other field before reaching the next
   // one, which is the wrong shape for working down the book. Enter jumps
@@ -713,6 +763,18 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     if (next) next.focus()
     else e.currentTarget.blur()
   }
+  // Every column sorts. The arrow marks the one in force and which way.
+  const th = (key, label, className) => (
+    <th key={key} className={className}>
+      <button type="button" className={`sortbtn ${sort.key === key ? 'on' : ''}`}
+        onClick={() => onSort(key)}
+        title={`Sort by ${label.toLowerCase()}`}
+        aria-sort={sort.key === key ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>
+        {label}<span className="arrow">{sort.key === key ? (sort.dir > 0 ? '▲' : '▼') : ''}</span>
+      </button>
+    </th>
+  )
+
   const variance = (p) => {
     if (!p) return { text: '—', cls: '' }
     if (p.complete) return { text: 'complete', cls: 'good' }
@@ -724,23 +786,23 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   return (
     <div className="tablewrap">
       <div className="tablehint">
-        <span>Enter a target date and press <kbd>Enter</kbd> to drop to the next one.
-          Rows hold their place while you type.</span>
-        <button className="btn sm" onClick={onResort}>Re-sort by date</button>
+        <span>Click a column to sort. Enter a target date and press <kbd>Enter</kbd> to drop
+          to the next one — rows hold their place while you type.</span>
+        <button className="btn sm" onClick={onResort} title="Apply the current sort again">Re-sort</button>
       </div>
       <table className="orders">
         <thead>
           <tr>
-            <th className="w-unit">Unit</th>
-            <th className="w-date">Target date</th>
-            {tracking && <th className="w-stage">Stage</th>}
-            {tracking && <th className="w-since">In stage since</th>}
-            {tracking && <th className="w-num">Left</th>}
-            <th className="w-calc">Projected</th>
-            <th className="w-calc">Variance</th>
-            {partsEnabled && <th className="w-pn">Part number</th>}
-            <th>Description</th>
-            {OPS.map((o) => <th key={o.key} className="w-num">{SHORT[o.key]}</th>)}
+            {th('unit', 'Unit', 'w-unit')}
+            {th('delivery', 'Target date', 'w-date')}
+            {tracking && th('stage', 'Stage', 'w-stage')}
+            {tracking && th('since', 'In stage since', 'w-since')}
+            {tracking && th('left', 'Left', 'w-num')}
+            {th('projected', 'Projected', 'w-calc')}
+            {th('variance', 'Variance', 'w-calc')}
+            {partsEnabled && th('part', 'Part number', 'w-pn')}
+            {th('desc', 'Description')}
+            {OPS.map((o) => th(o.key, SHORT[o.key], 'w-num'))}
           </tr>
         </thead>
         <tbody>
@@ -1200,6 +1262,12 @@ function Style() {
     .orders td.calc.good { color: #2D6044; }
     .orders .w-stage { width: 118px; }
     .orders .w-since { width: 152px; }
+    .orders th { padding: 0; }
+    .sortbtn { font-family: inherit; font-size: inherit; font-weight: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; background: none; border: 0; width: 100%; text-align: left; padding: 9px 10px; cursor: pointer; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+    .sortbtn:hover { background: #EDF2F6; color: #1B2126; }
+    .sortbtn.on { color: #1B2126; }
+    .sortbtn:focus-visible { outline: 2px solid #44688F; outline-offset: -2px; }
+    .sortbtn .arrow { font-size: 8px; line-height: 1; }
     .since { display: flex; flex-direction: column; gap: 1px; }
     .since input { padding-block: 4px; }
     .sincedays { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; padding-left: 8px; }

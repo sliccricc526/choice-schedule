@@ -38,7 +38,9 @@ Two views of the same plan, switched from the header.
 
 **Table** is for working through the book — every unit as a row with its target date in the second column. Type a date and press <kbd>Enter</kbd> to drop to the next one; tabbing would cross every other field first. Unit, part number, description and the three durations are editable in the same row, and the computed fabrication start and slack/late status sit at the end, read-only.
 
-Rows are ordered by target date but **hold their place while you type**. Re-sorting on every keystroke would slide a row out from under the cursor as soon as its date passed its neighbour's, and `Enter` would drop into a different unit than the one below. The order settles when you open the table, when units are added or removed, or when you press **Re-sort by date**.
+**Click any column heading to sort by it**; click it again to reverse. Stage sorts in shop order (not started → fabrication → paint → assembly → complete) rather than alphabetically, and Variance, Left and the day counts open largest-first, since "what is worst" is the reason to sort by them. Blanks go to the bottom whichever way a column points, so untagged or not-started units never head the list.
+
+Rows are ordered by target date to begin with, and **hold their place while you type**. Re-sorting on every keystroke would slide a row out from under the cursor as soon as its date passed its neighbour's, and `Enter` would drop into a different unit than the one below. The order settles when you open the table, when units are added or removed, when you pick a column, or when you press **Re-sort**.
 
 Removing a unit is still done from the board: select it and use **Remove unit**.
 
