@@ -118,22 +118,47 @@ export default function App() {
   }, [session, status])
 
   const userId = session ? session.user.id : null
+  // A realtime event is mostly the echo of our own write. Reloading on each one
+  // refetched every table and replaced the board underneath whoever was typing,
+  // so the reload is held until the edits have settled.
+  const reloadTimer = useRef(null)
+  const scheduleReload = useCallback(() => {
+    clearTimeout(reloadTimer.current)
+    reloadTimer.current = setTimeout(function again() {
+      if (pendingWrites.current > 0) { reloadTimer.current = setTimeout(again, 400); return }
+      load()
+    }, 900)
+  }, [load])
+
   useEffect(() => {
     if (!supabase || !userId) return
     load()
     // Live sync: any change from any user refreshes every open board.
     const ch = supabase
       .channel('schedule-sync')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'station_caps' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'day_overrides' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'station_caps' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'day_overrides' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, scheduleReload)
       .subscribe()
-    return () => { supabase.removeChannel(ch) }
-  }, [load, userId])
+    return () => { supabase.removeChannel(ch); clearTimeout(reloadTimer.current) }
+  }, [load, scheduleReload, userId])
 
-  const saveJob = async (id, patch) => {
-    setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)))
+  // Typing used to write a row per keystroke, and every write came straight back
+  // as a realtime event that reloaded all five tables and replaced the jobs
+  // array mid-edit — so characters landed and were then overwritten by the
+  // refetch. Edits are now applied locally at once and persisted after a pause,
+  // and a reload waits until nothing is in flight.
+  const SAVE_AFTER = 500
+  const pendingWrites = useRef(0)
+  const queuedJobs = useRef(new Map())
+  const jobTimers = useRef(new Map())
+
+  const flushJob = useCallback(async (id) => {
+    const patch = queuedJobs.current.get(id)
+    queuedJobs.current.delete(id)
+    jobTimers.current.delete(id)
+    if (!patch) { pendingWrites.current = Math.max(0, pendingWrites.current - 1); return }
     const row = {}
     if (patch.unit !== undefined) row.unit = patch.unit
     if (patch.desc !== undefined) row.description = patch.desc
@@ -146,8 +171,17 @@ export default function App() {
     if (patch.stageStarted !== undefined) row.stage_started = patch.stageStarted ? isoDate(patch.stageStarted) : null
     if (patch.daysLeft !== undefined) row.days_left = patch.daysLeft
     const { error: e } = await supabase.from('jobs').update(row).eq('id', id)
+    pendingWrites.current = Math.max(0, pendingWrites.current - 1)
     if (e) { setError(e.message); load() }
-  }
+  }, [load])
+
+  const saveJob = useCallback((id, patch) => {
+    setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)))
+    if (!queuedJobs.current.has(id)) pendingWrites.current += 1
+    queuedJobs.current.set(id, { ...(queuedJobs.current.get(id) || {}), ...patch })
+    clearTimeout(jobTimers.current.get(id))
+    jobTimers.current.set(id, setTimeout(() => flushJob(id), SAVE_AFTER))
+  }, [flushJob])
   const addJob = async () => {
     const p = parts.find((x) => x.id === addPart)
     const row = {
@@ -176,11 +210,34 @@ export default function App() {
     })
   }
 
-  const savePart = async (id, patch) => {
-    setParts((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)))
+  const queuedParts = useRef(new Map())
+  const partTimers = useRef(new Map())
+  const flushPart = useCallback(async (id) => {
+    const patch = queuedParts.current.get(id)
+    queuedParts.current.delete(id)
+    partTimers.current.delete(id)
+    if (!patch) { pendingWrites.current = Math.max(0, pendingWrites.current - 1); return }
     const { error: e } = await supabase.from('part_numbers').update(patch).eq('id', id)
+    pendingWrites.current = Math.max(0, pendingWrites.current - 1)
     if (e) { setError(e.message); load() }
-  }
+  }, [load])
+  const savePart = useCallback((id, patch) => {
+    setParts((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)))
+    if (!queuedParts.current.has(id)) pendingWrites.current += 1
+    queuedParts.current.set(id, { ...(queuedParts.current.get(id) || {}), ...patch })
+    clearTimeout(partTimers.current.get(id))
+    partTimers.current.set(id, setTimeout(() => flushPart(id), SAVE_AFTER))
+  }, [flushPart])
+
+  // Flush anything still queued if the tab goes away mid-edit.
+  useEffect(() => {
+    const flushAll = () => {
+      jobTimers.current.forEach((t, id) => { clearTimeout(t); flushJob(id) })
+      partTimers.current.forEach((t, id) => { clearTimeout(t); flushPart(id) })
+    }
+    window.addEventListener('pagehide', flushAll)
+    return () => { window.removeEventListener('pagehide', flushAll); flushAll() }
+  }, [flushJob, flushPart])
   const newPart = async () => {
     const taken = new Set(parts.map((p) => p.part_number))
     let name = 'NEW-PN'
@@ -241,11 +298,18 @@ export default function App() {
       : await supabase.from('day_overrides').upsert({ day: iso, working })
     if (e) { setError(e.message); load() }
   }
-  const saveCap = async (station, cap) => {
+  const capTimers = useRef(new Map())
+  const saveCap = useCallback((station, cap) => {
     setCaps((c) => ({ ...c, [station]: cap }))
-    const { error: e } = await supabase.from('station_caps').upsert({ station, cap })
-    if (e) { setError(e.message); load() }
-  }
+    if (!capTimers.current.has(station)) pendingWrites.current += 1
+    clearTimeout(capTimers.current.get(station))
+    capTimers.current.set(station, setTimeout(async () => {
+      capTimers.current.delete(station)
+      const { error: e } = await supabase.from('station_caps').upsert({ station, cap })
+      pendingWrites.current = Math.max(0, pendingWrites.current - 1)
+      if (e) { setError(e.message); load() }
+    }, SAVE_AFTER))
+  }, [load])
 
   const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
 
