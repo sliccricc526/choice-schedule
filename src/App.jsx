@@ -30,6 +30,7 @@ export default function App() {
   // undefined while we're still asking Supabase, null when signed out.
   const [session, setSession] = useState(undefined)
   const [showPassword, setShowPassword] = useState(false)
+  const [view, setView] = useState('board')
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -248,6 +249,31 @@ export default function App() {
     return { days, months }
   }, [scheduled, today])
 
+  // The table is for working through the book, so order it by the date being
+  // entered rather than by the computed start the board sorts on. The order is
+  // held steady while you type: re-sorting on every keystroke would slide the
+  // row out from under the cursor the moment a date passes its neighbour's, and
+  // Enter would drop into a different unit than the one below. It settles again
+  // when the table is opened, when units are added or removed, or on request.
+  const [tableOrder, setTableOrder] = useState([])
+  const scheduledRef = useRef(scheduled)
+  scheduledRef.current = scheduled
+  const resortTable = useCallback(() => {
+    setTableOrder(scheduledRef.current
+      .slice()
+      .sort((a, b) => (a.delivery - b.delivery) || a.unit.localeCompare(b.unit))
+      .map((j) => j.id))
+  }, [])
+  const idKey = scheduled.map((j) => j.id).sort().join(',')
+  useEffect(() => { resortTable() }, [view, idKey, resortTable])
+
+  const tableRows = useMemo(() => {
+    const byId = new Map(scheduled.map((j) => [j.id, j]))
+    const ordered = tableOrder.map((id) => byId.get(id)).filter(Boolean)
+    const seen = new Set(ordered.map((j) => j.id))
+    return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
+  }, [scheduled, tableOrder])
+
   const dayIndex = (d) => daysBetween(days[0], d)
 
   const loads = useMemo(() => {
@@ -298,6 +324,14 @@ export default function App() {
       <div className="head">
         <div className="title">Shop schedule <span>· scheduled backward from delivery</span></div>
         <div className="stats">
+          <div className="views">
+            {['board', 'table'].map((v) => (
+              <button key={v} className={view === v ? 'on' : ''}
+                onClick={() => { setView(v); setSelected(null) }}>
+                {v === 'board' ? 'Board' : 'Table'}
+              </button>
+            ))}
+          </div>
           <label className="toggle">
             <input type="checkbox" checked={leveled} onChange={(e) => setLeveled(e.target.checked)} />
             Level to capacity
@@ -316,6 +350,7 @@ export default function App() {
         </div>
       </div>
 
+      {view === 'board' ? (<>
       <div className="legend">
         {OPS.map((o) => <div key={o.key}><span className="chip" style={{ background: o.color }} />{o.label}</div>)}
         <div><span className="chip todaychip" />Today</div>
@@ -360,6 +395,10 @@ export default function App() {
           ))}
         </div>
       </div>
+      </>) : (
+        <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
+          onSave={saveJob} onApplyPart={applyPart} onResort={resortTable} />
+      )}
 
       {sel ? (
         <div className="panel">
@@ -492,6 +531,79 @@ function SignIn() {
         </button>
         <p className="sub small">Need an account, or forgotten your password? Ask whoever set up the board.</p>
       </form>
+    </div>
+  )
+}
+
+function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort }) {
+  if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
+  // Tabbing out of a date crosses every other field before reaching the next
+  // one, which is the wrong shape for working down the book. Enter jumps
+  // straight to the date below. Arrow keys are left alone — the browser uses
+  // them to step the day/month/year the cursor is sitting on.
+  const toNextDate = (e) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    const next = document.querySelector(`[data-daterow="${Number(e.currentTarget.dataset.daterow) + 1}"]`)
+    if (next) next.focus()
+    else e.currentTarget.blur()
+  }
+  const status = (j) => (j.late
+    ? { text: j.lateDays ? `${j.lateDays}d late` : `${Math.abs(j.slack)}d behind`, bad: true }
+    : { text: `${j.slack}d slack`, bad: false })
+
+  return (
+    <div className="tablewrap">
+      <div className="tablehint">
+        <span>Enter a target date and press <kbd>Enter</kbd> to drop to the next one.
+          Rows hold their place while you type.</span>
+        <button className="btn sm" onClick={onResort}>Re-sort by date</button>
+      </div>
+      <table className="orders">
+        <thead>
+          <tr>
+            <th className="w-unit">Unit</th>
+            <th className="w-date">Target date</th>
+            {partsEnabled && <th className="w-pn">Part number</th>}
+            <th>Description</th>
+            {OPS.map((o) => <th key={o.key} className="w-num">{SHORT[o.key]}</th>)}
+            <th className="w-calc">Fab starts</th>
+            <th className="w-calc">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((j, i) => {
+            const st = status(j)
+            return (
+              <tr key={j.id} className={j.late ? 'late' : ''}>
+                <td><input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} /></td>
+                <td>
+                  <input type="date" data-daterow={i} value={isoDate(j.delivery)}
+                    onKeyDown={toNextDate}
+                    onChange={(e) => e.target.value && onSave(j.id, { delivery: parseDate(e.target.value) })} />
+                </td>
+                {partsEnabled && (
+                  <td>
+                    <select value={j.partId || ''} onChange={(e) => onApplyPart(j.id, e.target.value)}>
+                      <option value="">—</option>
+                      {parts.map((p) => <option key={p.id} value={p.id}>{p.part_number}</option>)}
+                    </select>
+                  </td>
+                )}
+                <td><input value={j.desc} onChange={(e) => onSave(j.id, { desc: e.target.value })} /></td>
+                {OPS.map((o) => (
+                  <td key={o.key}>
+                    <input type="number" min="1" value={j[o.key]}
+                      onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />
+                  </td>
+                ))}
+                <td className="calc">{fmt(j.mustStart)}</td>
+                <td className={`calc ${st.bad ? 'bad' : ''}`}>{st.text}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -720,6 +832,26 @@ function Style() {
     .btn:hover { background: #F2F4F5; }
     .btn.danger { color: #B3382E; border-color: #DCB4B0; }
     .btnrow { display: flex; gap: 10px; }
+    .views { display: flex; border: 1px solid #C6CDD1; border-radius: 4px; overflow: hidden; }
+    .views button { font-family: inherit; font-size: 12px; font-weight: 600; padding: 5px 13px; border: 0; background: #FFF; color: #5B6670; cursor: pointer; }
+    .views button + button { border-left: 1px solid #C6CDD1; }
+    .views button.on { background: #1B2126; color: #FFF; }
+    .tablewrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; }
+    .tablehint { font-size: 11px; color: #7A848C; padding: 9px 12px 2px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .tablehint kbd { font-family: inherit; font-size: 10px; background: #EEF0F1; border: 1px solid #D4D9DC; border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
+    .orders { border-collapse: collapse; width: 100%; font-size: 13px; }
+    .orders th { text-align: left; font-size: 11px; font-weight: 600; color: #7A848C; padding: 9px 10px; border-bottom: 1px solid #D4D9DC; white-space: nowrap; background: #F6F8F9; }
+    .orders td { padding: 4px 6px; border-bottom: 1px solid #E4E8EA; }
+    .orders tr:last-child td { border-bottom: 0; }
+    .orders tr.late td { background: #FCF4F3; }
+    .orders input, .orders select { font-family: inherit; font-size: 13px; padding: 6px 7px; border: 1px solid transparent; border-radius: 4px; width: 100%; background: transparent; }
+    .orders input:hover, .orders select:hover { border-color: #D4D9DC; }
+    .orders input:focus, .orders select:focus { outline: none; border-color: #44688F; background: #FFF; box-shadow: 0 0 0 2px rgba(68,104,143,.15); }
+    .orders td.calc { color: #5B6670; white-space: nowrap; padding-left: 10px; }
+    .orders td.calc.bad { color: #B3382E; font-weight: 600; }
+    .orders .w-unit { width: 130px; } .orders .w-pn { width: 110px; }
+    .orders .w-date { width: 150px; } .orders .w-num { width: 66px; } .orders .w-calc { width: 96px; }
+    .orders .w-num input { text-align: center; }
     .addrow { margin: 0 24px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   `}</style>
 }

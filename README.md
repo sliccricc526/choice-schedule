@@ -30,6 +30,18 @@ npm run dev
 3. Add two environment variables: `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 4. Deploy. Share the URL with the shop.
 
+## Board and table
+
+Two views of the same plan, switched from the header.
+
+**Board** is the Gantt: bars per operation, the day axis, station load, and the day toggles.
+
+**Table** is for working through the book — every unit as a row with its target date in the second column. Type a date and press <kbd>Enter</kbd> to drop to the next one; tabbing would cross every other field first. Unit, part number, description and the three durations are editable in the same row, and the computed fabrication start and slack/late status sit at the end, read-only.
+
+Rows are ordered by target date but **hold their place while you type**. Re-sorting on every keystroke would slide a row out from under the cursor as soon as its date passed its neighbour's, and `Enter` would drop into a different unit than the one below. The order settles when you open the table, when units are added or removed, or when you press **Re-sort by date**.
+
+Removing a unit is still done from the board: select it and use **Remove unit**.
+
 ## Part numbers
 
 A part number is the standard build for a trailer model — a description plus working days for fabrication, paint and final assembly. **Edit part numbers** under the board opens the catalog; **Add unit** lets you start a new build from one instead of from blanks.
