@@ -520,7 +520,7 @@ export default function App() {
       </>) : view === 'table' ? (
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
-          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} />
+          projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today} />
       ) : (
         <StageReport log={stageLog} jobs={jobs} partsById={partsById} />
       )}
@@ -559,15 +559,22 @@ export default function App() {
               </div>
               {sel.stage && sel.stage !== 'none' && sel.stage !== 'done' && (
                 <>
+                  <div className="field"><span>Went into {STAGE_LABEL[sel.stage].toLowerCase()}</span>
+                    <input type="date" max={isoDate(today)}
+                      value={sel.stageStarted ? isoDate(sel.stageStarted) : ''}
+                      onChange={(e) => saveJob(sel.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
+                  </div>
                   <div className="field"><span>Days left on {STAGE_LABEL[sel.stage].toLowerCase()}</span>
                     <input className="num" type="number" min="0"
                       value={sel.daysLeft == null ? sel[sel.stage] : sel.daysLeft}
                       onChange={(e) => saveJob(sel.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
                   </div>
                   <div className="stageline">
-                    {selProj && selProj.spent > sel[sel.stage]
-                      ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
-                      : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
+                    {!sel.stageStarted
+                      ? <span>Set the date it went in and the days spent will count themselves.</span>
+                      : selProj && selProj.spent > sel[sel.stage]
+                        ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
+                        : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
                   </div>
                 </>
               )}
@@ -693,7 +700,7 @@ function SignIn() {
   )
 }
 
-function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance }) {
+function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance, today }) {
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // Tabbing out of a date crosses every other field before reaching the next
   // one, which is the wrong shape for working down the book. Enter jumps
@@ -727,7 +734,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
             <th className="w-unit">Unit</th>
             <th className="w-date">Target date</th>
             {tracking && <th className="w-stage">Stage</th>}
-            {tracking && <th className="w-num">Spent</th>}
+            {tracking && <th className="w-since">In stage since</th>}
             {tracking && <th className="w-num">Left</th>}
             <th className="w-calc">Projected</th>
             <th className="w-calc">Variance</th>
@@ -760,8 +767,18 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                   </td>
                 )}
                 {tracking && (
-                  <td className={`calc ${over ? 'bad' : ''}`}>
-                    {planned ? `${p.spent}/${planned}${over ? ' ⚠' : ''}` : '—'}
+                  <td>
+                    {planned ? (
+                      <div className="since">
+                        <input type="date" max={isoDate(today)}
+                          value={j.stageStarted ? isoDate(j.stageStarted) : ''}
+                          title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
+                          onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
+                        <span className={`sincedays ${over ? 'bad' : ''}`}>
+                          {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}` : `not set · ${planned} d booked`}
+                        </span>
+                      </div>
+                    ) : <span className="calc">—</span>}
                   </td>
                 )}
                 {tracking && (
@@ -1182,6 +1199,11 @@ function Style() {
     .stageline .bad { color: #B3382E; font-weight: 600; }
     .orders td.calc.good { color: #2D6044; }
     .orders .w-stage { width: 118px; }
+    .orders .w-since { width: 152px; }
+    .since { display: flex; flex-direction: column; gap: 1px; }
+    .since input { padding-block: 4px; }
+    .sincedays { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; padding-left: 8px; }
+    .sincedays.bad { color: #B3382E; font-weight: 600; }
     /* stage report */
     .reportwrap { margin: 0 24px 24px; display: flex; flex-direction: column; gap: 18px; }
     .rephead { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 14px 18px; font-size: 13px; color: #3A434B; }

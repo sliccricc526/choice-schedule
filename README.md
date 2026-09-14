@@ -44,7 +44,9 @@ Removing a unit is still done from the board: select it and use **Remove unit**.
 
 ## Production tracking
 
-The board knows three things about each unit: which station it's on (**Stage**), how many working days the shop says are left on that station (**Left**), and when that station started — which is where **Spent** comes from. Everything else is derived.
+The board knows three things about each unit: which station it's on (**Stage**), when it went in (**In stage since**), and how many working days the shop says are left on it (**Left**). Everything else is derived.
+
+**In stage since** is editable, in the table and in the unit panel. Advancing a station stamps today, but back-date it when a unit was already on the floor before anyone entered it here — otherwise a trailer three weeks into fabrication reads as one day spent. It also sets the `actual_days` written to the stage log when that station closes, so the report is only as honest as this date.
 
 - **Projected** — the unit's remaining work scheduled *forward* from today against the same station capacities. Work already on the floor can't be pushed back into the past, so a unit under way starts now. That's what makes the projection differ from the plan.
 - **Variance** — projected finish against the target date, in working days. `+3d late` means it lands three working days past its date; `4d slack` means there's that much room before it.
