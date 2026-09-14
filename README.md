@@ -49,7 +49,17 @@ The board knows three things about each unit: which station it's on (**Stage**),
 - **Projected** — the unit's remaining work scheduled *forward* from today against the same station capacities. Work already on the floor can't be pushed back into the past, so a unit under way starts now. That's what makes the projection differ from the plan.
 - **Variance** — projected finish against the target date, in working days. `+3d late` means it lands three working days past its date; `4d slack` means there's that much room before it.
 
-Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days, so after a dozen trailers you can check whether an 80-ton RGN really takes twelve fab days.
+Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days.
+
+### The report
+
+The **Report** view reads that log back three ways:
+
+- **By station** — how fabrication, paint and assembly each run against their estimates on average. The rule on each bar is what was booked and the fill is what it took, so a fill past the rule is an overrun.
+- **By model** — booked against took, per station, grouped by part number (or by the unit's description where it has no part number). This is the one that answers whether an 80-ton RGN really takes twelve fab days.
+- **Recent closures** — the last 25 stations closed, with the difference on each.
+
+Percentages are computed on totals rather than averaged, so a long station counts for more than a short one. A model's figures follow the part number a unit carries *now*, so re-tagging a unit moves its history with it.
 
 On the board each row carries two lanes: the plan on top (outlined), and where the remaining work actually lands underneath (solid, red when it runs past the target). The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
 
