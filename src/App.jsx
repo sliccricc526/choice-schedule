@@ -270,7 +270,10 @@ export default function App() {
     if (!trackingEnabled) return
     const from = job.stage || 'none'
     if (from === 'done') return
-    if (from !== 'none') {
+    // Only record what was actually measured. Without a start date the days
+    // spent are unknown, not zero — logging zero would teach the report that
+    // the station takes no time, which is worse than having no figure at all.
+    if (from !== 'none' && job.stageStarted) {
       const { error: le } = await supabase.from('stage_log').upsert({
         job_id: job.id, stage: from,
         planned_days: job[from], actual_days: daysSpent(job, today, cal),
@@ -621,7 +624,8 @@ export default function App() {
                   </div>
                   <div className="stageline">
                     {!sel.stageStarted
-                      ? <span>Set the date it went in and the days spent will count themselves.</span>
+                      ? <span>No start date, so the days spent are unknown. Closing this station
+                          won't be recorded in the report — set the date first if you know it.</span>
                       : selProj && selProj.spent > sel[sel.stage]
                         ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
                         : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
@@ -823,7 +827,9 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                 {tracking && (
                   <td>
                     <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
-                      title={live === 'done' ? 'Complete' : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`}>
+                      title={live === 'done' ? 'Complete'
+                        : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
+                          + (live !== 'none' && !j.stageStarted ? ' — no start date, so this closure is not recorded' : '')}>
                       <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
                     </button>
                   </td>
@@ -1004,6 +1010,9 @@ function StageReport({ log, jobs, partsById }) {
         <p>Every time a station is closed with <strong>Move to …</strong>, the days it was
           booked for and the days it actually took are recorded here. After a dozen trailers
           this answers whether an 80-ton RGN really takes twelve fab days.</p>
+        <p style={{ marginTop: 10 }}>Stations closed without a start date aren't recorded — the
+          days they took are unknown, not zero. Units already on the floor before tracking began
+          will usually go uncounted for their current station, and start counting at the next one.</p>
       </div>
     </div>
   )
@@ -1100,7 +1109,10 @@ function StageReport({ log, jobs, partsById }) {
             </tbody>
           </table>
         </div>
-        {rows.length > 25 && <p className="foot">Showing the 25 most recent of {rows.length}.</p>}
+        <p className="foot">
+          {rows.length > 25 ? `Showing the 25 most recent of ${rows.length}. ` : ''}
+          Stations closed without a start date are not counted here — unknown is not the same as zero.
+        </p>
       </div>
     </div>
   )

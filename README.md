@@ -53,7 +53,9 @@ The board knows three things about each unit: which station it's on (**Stage**),
 - **Projected** — the unit's remaining work scheduled *forward* from today against the same station capacities. Work already on the floor can't be pushed back into the past, so a unit under way starts now. That's what makes the projection differ from the plan.
 - **Variance** — projected finish against the target date, in working days. `+3d late` means it lands three working days past its date; `4d slack` means there's that much room before it.
 
-Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days.
+Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days — **unless the station has no start date**, in which case nothing is recorded. The days it took are unknown, not zero, and logging zero would teach the report that the station takes no time at all.
+
+That is the normal case for units already on the floor when tracking begins: you often can't say when their current station started. Leave the date blank rather than guessing. Those units go uncounted for the station they're on now and start counting at the next one, which does begin under the app.
 
 ### The report
 
