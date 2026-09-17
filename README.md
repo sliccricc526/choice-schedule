@@ -17,7 +17,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 
 If you set this up before the shop calendar, the part-number catalog or production tracking existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
-The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty, they can't be corrected by hand, and the report says so.
+The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
 ### 2. Local dev
 ```bash
@@ -59,13 +59,18 @@ Click a stage chip in the table, or use **Move to …** in the unit panel, to cl
 
 That is the normal case for units already on the floor when tracking begins: you often can't say when their current station started. Leave the date blank rather than guessing. Those units go uncounted for the station they're on now and start counting at the next one, which does begin under the app.
 
-### The report
+### The report — switched off
 
-The **Report** view reads that log back four ways:
+The shop is using this as a scheduling tool, not to run time studies, so the **Report** tab is
+hidden: `SHOW_REPORT` at the top of `src/App.jsx` is `false`. Stations carry on recording their
+planned and actual days as they close, so the history is accumulating for the day it is wanted —
+set the flag to `true` and the tab comes back with everything that has been logged since.
+
+What it shows when it is on, four ways:
 
 - **By station** — how fabrication, paint and assembly each run against their estimates on average. The rule on each bar is what was booked and the fill is what it took, so a fill past the rule is an overrun.
 - **By model** — booked against took, per station, grouped by part number (or by the unit's description where it has no part number). This is the one that answers whether an 80-ton RGN really takes twelve fab days.
-- **Stage dates — planned against actual** — every unit's three stations with planned start, planned finish, actual start and actual finish side by side, and the working-day difference on each end. A station still open shows where the projection now puts its finish, marked `proj`, rather than a blank. The same four dates are in the unit panel on the board and table views, for one unit at a time, and that is where they are edited — this table is read-only.
+- **Stage dates — planned against actual** — every unit's three stations with planned start, planned finish, actual start and actual finish side by side, and the working-day difference on each end. A station still open shows where the projection now puts its finish, marked `proj`, rather than a blank. The same four dates are in the unit panel on the board and table views, for one unit at a time — that half is **not** hidden, because knowing when a unit is due into paint is scheduling rather than reporting. It is also where the dates are edited; this table is read-only.
 - **Recent closures** — the last 25 stations closed, with the difference on each and the dates it ran between.
 
 Percentages are computed on totals rather than averaged, so a long station counts for more than a short one. A model's figures follow the part number a unit carries *now*, so re-tagging a unit moves its history with it.
@@ -78,11 +83,11 @@ Actual dates are stamped as a station closes, which is right when someone clicks
 
 What can be corrected depends on the station:
 
-- **Closed** — both dates. The days it took are recounted from them and written back to the log, so the figures in the report can never drift away from the dates shown beside them.
+- **Closed** — both dates. The days it took are recounted from them and written back to the log, so the recorded figures can never drift away from the dates shown beside them.
 - **On now** — the start only, which is the same value as **In stage since** and **Went into …**; editing either moves the other. It has no finish until it is closed, and closing it is what sets one — a date field that closed a station behind your back would be a nasty surprise.
 - **Not started** — neither. Nothing has happened to record.
 
-Clearing both dates on a closed station deletes its log row, which drops it from the report. Setting only one leaves the days it took unknown: the row keeps the date but records no figure, and the report's estimate sections leave it out rather than counting it as zero. It still appears in the stage-date table, so it is visible rather than silently dropped.
+Clearing both dates on a closed station deletes its log row. Setting only one leaves the days it took unknown: the row keeps the date but records no figure, and the estimate sections of the report leave it out rather than counting it as zero. It still appears in the stage-date table, so it is visible rather than silently dropped.
 
 Stations closed before those two columns existed keep whatever the log has — usually a finish date and no start. Filling in the start writes both down properly and recounts the days from them.
 

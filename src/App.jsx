@@ -10,6 +10,11 @@ const COL = 26
 const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
+// The stage-log report is time study, not scheduling, and the shop is not using
+// it yet. Closures carry on being recorded either way, so the history is there
+// the day it is wanted — set this to true to put the tab back.
+const SHOW_REPORT = false
+
 export default function App() {
   const today = useMemo(() => strip(new Date()), [])
   const [jobs, setJobs] = useState([])
@@ -613,7 +618,7 @@ export default function App() {
         <div className="title">Shop schedule <span>· scheduled backward from delivery</span></div>
         <div className="stats">
           <div className="views">
-            {['board', 'table', ...(trackingEnabled ? ['report'] : [])].map((v) => (
+            {['board', 'table', ...(trackingEnabled && SHOW_REPORT ? ['report'] : [])].map((v) => (
               <button key={v} className={view === v ? 'on' : ''}
                 onClick={() => { setView(v); setSelected(null) }}>
                 {v === 'board' ? 'Board' : v === 'table' ? 'Table' : 'Report'}
@@ -746,8 +751,8 @@ export default function App() {
                   </div>
                   <div className="stageline">
                     {!sel.stageStarted
-                      ? <span>No start date, so the days spent are unknown. Closing this station
-                          won't be recorded in the report — set the date first if you know it.</span>
+                      ? <span>No start date, so the days spent aren't counted. Set it if you know
+                          when this unit went into {STAGE_LABEL[sel.stage].toLowerCase()}.</span>
                       : selProj && selProj.spent > sel[sel.stage]
                         ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
                         : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
@@ -775,9 +780,9 @@ export default function App() {
                 run and still make {fmt(sel.delivery)} — so it moves when the delivery date, the day
                 counts or the shop calendar do. Actual dates are stamped as a station is closed and
                 can be corrected here afterwards; the days a closed station took are recounted from
-                them, so the report follows. The station on now takes its start from the same field
-                as <em>Went into …</em> above and gets its finish when you close it. Clearing both
-                dates drops that station from the report — unknown is not zero.
+                them. The station on now takes its start from the same field as <em>Went into …</em>
+                above and gets its finish when you close it. Clearing both dates forgets that
+                station's dates altogether — unknown is not zero.
                 {!stageDatesEnabled && ' Correcting a closed station needs the started_on and finished_on columns on stage_log — see supabase/schema.sql.'}</p>
             </div>
           )}
@@ -969,7 +974,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                     <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
                       title={live === 'done' ? 'Complete'
                         : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
-                          + (live !== 'none' && !j.stageStarted ? ' — no start date, so this closure is not recorded' : '')}>
+                          + (live !== 'none' && !j.stageStarted ? ' — no start date set, so the days spent are not counted' : '')}>
                       <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
                     </button>
                   </td>
