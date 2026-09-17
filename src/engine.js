@@ -199,13 +199,22 @@ export function remainingWork(job) {
   return out
 }
 
+// Working days from a to b counting both ends — what a station took when it
+// opened on a and closed on b. Zero when b falls before a, since a station
+// cannot close before it opens.
+export function workdaysInclusive(a, b, cal = defaultCalendar) {
+  const s = strip(a), e = strip(b)
+  if (e < s) return 0
+  return cal.workdaysBetween(s, e) + (cal.isWorkday(s) ? 1 : 0)
+}
+
 // Working days spent on the station in progress, counting the day it started.
 export function daysSpent(job, today, cal = defaultCalendar) {
   const stage = job.stage || 'none'
   if (stage === 'none' || stage === 'done' || !job.stageStarted) return 0
   const start = strip(job.stageStarted)
   if (start > strip(today)) return 0
-  return cal.workdaysBetween(start, today) + (cal.isWorkday(start) ? 1 : 0)
+  return workdaysInclusive(start, today, cal)
 }
 
 // Where the work actually lands: remaining work scheduled FORWARD from today

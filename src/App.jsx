@@ -3,6 +3,7 @@ import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
+  workdaysInclusive,
 } from './engine.js'
 
 const COL = 26
@@ -337,6 +338,57 @@ export default function App() {
   }, [load])
 
   const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
+
+  // Correct the dates a station actually ran between.
+  //
+  // Where they live depends on the station. The one in progress keeps its start
+  // on the unit itself — the same field as "Went into …" — and has no finish
+  // until it is closed, so closing it is what sets one. A station already closed
+  // keeps both dates on its stage log row, and the days it took are recomputed
+  // from them, so the figures in the report can never drift away from the dates
+  // shown beside them.
+  const saveStageDates = useCallback(async (job, stage, patch) => {
+    if ((job.stage || 'none') === stage) {
+      if (patch.start !== undefined) saveJob(job.id, { stageStarted: patch.start })
+      return
+    }
+    if (!stageDatesEnabled) return
+    const cur = (stageLog || []).find((l) => l.job_id === job.id && l.stage === stage)
+    const started = patch.start !== undefined ? patch.start
+      : cur && cur.started_on ? parseDate(cur.started_on) : null
+    // Falling back to closed_on the way the table does, so an edit acts on the
+    // dates being shown. A row from before these columns existed thereby gets
+    // its displayed finish written down properly the first time it is touched.
+    const curFinish = cur && (cur.finished_on || cur.closed_on)
+    const finished = patch.finish !== undefined ? patch.finish
+      : curFinish ? parseDate(curFinish) : null
+
+    // Both dates gone means nothing is known about the station any more, and a
+    // row saying only that it was booked for eight days is worse than no row.
+    if (!started && !finished) {
+      setStageLog((ls) => ls.filter((l) => !(l.job_id === job.id && l.stage === stage)))
+      const { error: e } = await supabase.from('stage_log').delete()
+        .eq('job_id', job.id).eq('stage', stage)
+      if (e) { setError(e.message); load() }
+      return
+    }
+
+    const row = {
+      job_id: job.id, stage,
+      planned_days: cur ? cur.planned_days : Math.max(1, job[stage] || 1),
+      // Half a pair of dates cannot say how long the station took, and unknown
+      // is not zero — the report leaves such a row out rather than counting it.
+      actual_days: started && finished ? workdaysInclusive(started, finished, cal) : null,
+      started_on: started ? isoDate(started) : null,
+      finished_on: finished ? isoDate(finished) : null,
+    }
+    setStageLog((ls) => [
+      ...ls.filter((l) => !(l.job_id === job.id && l.stage === stage)),
+      { closed_on: (cur && cur.closed_on) || isoDate(today), ...row },
+    ])
+    const { error: e } = await supabase.from('stage_log').upsert(row)
+    if (e) { setError(e.message); load() }
+  }, [stageLog, stageDatesEnabled, saveJob, cal, today, load])
 
   const { scheduled, scheduleError } = useMemo(() => {
     try {
@@ -715,11 +767,18 @@ export default function App() {
             <div className="panelsect">
               <h4>Stage dates — planned against actual</h4>
               <div className="tablescroll">
-                <StageDateTable rows={selStages} compact />
+                <StageDateTable rows={selStages} compact today={today}
+                  logEditable={stageDatesEnabled}
+                  onEdit={(r, which, d) => saveStageDates(sel, r.key, { [which]: d })} />
               </div>
               <p className="foot">Planned is the just-in-time plan — the latest each station could
                 run and still make {fmt(sel.delivery)} — so it moves when the delivery date, the day
-                counts or the shop calendar do. Actual dates are fixed when the station is closed.</p>
+                counts or the shop calendar do. Actual dates are stamped as a station is closed and
+                can be corrected here afterwards; the days a closed station took are recounted from
+                them, so the report follows. The station on now takes its start from the same field
+                as <em>Went into …</em> above and gets its finish when you close it. Clearing both
+                dates drops that station from the report — unknown is not zero.
+                {!stageDatesEnabled && ' Correcting a closed station needs the started_on and finished_on columns on stage_log — see supabase/schema.sql.'}</p>
             </div>
           )}
           {selDrift && (
@@ -1041,8 +1100,22 @@ function ChangePassword({ email, onClose }) {
 // actually did. A station not yet closed has no actual finish — the projection
 // stands in for it, marked as a projection, because a guess printed as a fact
 // is how a board stops being believed.
-function StageDateTable({ rows, showUnit, showVar, showState, compact }) {
+function StageDateTable({ rows, showUnit, showVar, showState, compact, onEdit, logEditable, today }) {
   const date = (d) => (d ? fmt(d) : <span className="muted">—</span>)
+  // What can be corrected by hand, and what has to be corrected some other way.
+  // A station that hasn't run has no actual dates to give; the one in progress
+  // has a start but no finish, because a station finishes by being closed —
+  // typing a date into it would close it behind the user's back.
+  const canEdit = (r, which) => !onEdit ? false
+    : r.state === 'pending' ? false
+    : r.state === 'active' ? which === 'start'
+    : logEditable
+  const edit = (r, which, value, bounds) => (
+    <input type="date" className="dateedit" value={value ? isoDate(value) : ''}
+      {...bounds}
+      title={`When ${r.unit ? `${r.unit} ` : ''}${which === 'start' ? 'went into' : 'came out of'} ${STAGE_LABEL[r.key].toLowerCase()}`}
+      onChange={(e) => onEdit(r, which, e.target.value ? parseDate(e.target.value) : null)} />
+  )
   const delta = (n) => {
     if (n == null) return <span className="muted">—</span>
     if (n === 0) return <span className="good">on plan</span>
@@ -1068,9 +1141,21 @@ function StageDateTable({ rows, showUnit, showVar, showState, compact }) {
             <td><span className={`chip ${r.key}`}><i />{compact ? SHORT[r.key] : STAGE_LABEL[r.key]}</span></td>
             <td className="n">{date(r.plan && r.plan.start)}</td>
             <td className="n">{date(r.plan && r.plan.end)}</td>
-            <td className="n">{date(r.actual.start)}</td>
             <td className="n">
-              {r.actual.finish ? fmt(r.actual.finish)
+              {canEdit(r, 'start')
+                // A station cannot have opened after it closed, nor in the future.
+                ? edit(r, 'start', r.actual.start, {
+                    max: isoDate(r.actual.finish && r.actual.finish < today ? r.actual.finish : today),
+                  })
+                : date(r.actual.start)}
+            </td>
+            <td className="n">
+              {canEdit(r, 'finish')
+                ? edit(r, 'finish', r.actual.finish, {
+                    min: r.actual.start ? isoDate(r.actual.start) : undefined,
+                    max: isoDate(today),
+                  })
+                : r.actual.finish ? fmt(r.actual.finish)
                 : r.projected ? <span className="muted">proj {fmt(r.projected.end)}</span>
                 : <span className="muted">—</span>}
             </td>
@@ -1090,7 +1175,9 @@ function StageDateTable({ rows, showUnit, showVar, showState, compact }) {
 function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
   const rows = useMemo(() => {
     const byJob = new Map(jobs.map((j) => [j.id, j]))
-    return (log || []).map((l) => {
+    // A station whose dates are only half filled in has no days figure yet.
+    // It still shows in the stage-date table above; it just can't be averaged.
+    return (log || []).filter((l) => l.actual_days != null).map((l) => {
       const j = byJob.get(l.job_id)
       const part = j ? partsById.get(j.partId) : null
       return {
@@ -1107,7 +1194,7 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
         finished: l.finished_on ? parseDate(l.finished_on) : null,
         closed: l.closed_on ? parseDate(l.closed_on) : null,
       }
-    }).sort((a, b) => (b.closed || 0) - (a.closed || 0))
+    }).sort((a, b) => ((b.finished || b.closed) || 0) - ((a.finished || a.closed) || 0))
   }, [log, jobs, partsById])
 
   const roll = (rs) => {
@@ -1149,7 +1236,8 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
         still make the delivery date, capacity aside — so they move when a delivery date, a day
         count or the shop calendar changes, but not when levelling is switched on or off. Actual
         start is the day the unit went into the station and actual finish the day that station was
-        closed; both are fixed at closing time. Δ is working days against plan, so a negative start
+        closed; both are stamped as it closes and can be corrected afterwards on the unit itself, in
+        the panel under the board or table. Δ is working days against plan, so a negative start
         means the station opened earlier than it had to. A station still open shows where the
         projection puts its finish.
         {datesEnabled === false && ' Actual dates need the started_on and finished_on columns on stage_log — see supabase/schema.sql.'}
@@ -1270,7 +1358,8 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
         </div>
         <p className="foot">
           {rows.length > 25 ? `Showing the 25 most recent of ${rows.length}. ` : ''}
-          Stations closed without a start date are not counted here — unknown is not the same as zero.
+          Stations closed without a start date are not counted here, nor are those whose start and
+          finish are only half filled in — unknown is not the same as zero.
         </p>
       </div>
     </div>
@@ -1469,6 +1558,10 @@ function Style() {
     table.stagedates td { padding: 7px 12px; }
     table.stagedates tr.onnow td { background: #FBF7EF; }
     table.stagedates .muted { font-weight: 400; }
+    .dateedit { font-family: inherit; font-size: inherit; color: inherit; width: 100%; min-width: 118px;
+      border: 1px solid transparent; border-radius: 3px; background: none; padding: 2px 4px; margin: -2px -4px; }
+    .dateedit:hover { border-color: #C6CDD1; background: #FFF; }
+    .dateedit:focus { outline: 2px solid #44688F; outline-offset: -1px; border-color: transparent; background: #FFF; }
     .panelsect { margin: 14px 0 4px; display: flex; flex-direction: column; gap: 7px; }
     .panelsect h4 { margin: 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #5B6670; }
     .panelsect .foot { margin: 0; font-size: 11px; color: #7A848C; line-height: 1.5; }
@@ -1496,7 +1589,8 @@ function Style() {
     .lcell { border-top: 1px solid #E4E8EA; border-left: 1px solid #F0F2F3; height: 30px; font-size: 11px; display: flex; align-items: center; justify-content: center; position: relative; font-weight: 600; }
     .lcell.we { background: #F5F6F7; }
     .lcell.over { background: #F3D2CE !important; color: #7C221B !important; font-weight: 700; }
-    .panel { margin: 0 24px 28px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 16px 18px; max-width: 560px; }
+    /* wide enough for the four stage dates to sit side by side without scrolling */
+    .panel { margin: 0 24px 28px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 16px 18px; max-width: 600px; }
     .panel.wide { max-width: 780px; }
     .panel h3 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
     .panel .sub { margin: -6px 0 14px; font-size: 12px; color: #5B6670; line-height: 1.5; }

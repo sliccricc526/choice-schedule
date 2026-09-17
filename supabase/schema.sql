@@ -71,6 +71,12 @@ alter table public.stage_log
 
 update public.stage_log set finished_on = closed_on where finished_on is null;
 
+-- `actual_days` is derived from those two dates, so it has to be able to say
+-- "not known yet" for a station whose dates are only half filled in. A row with
+-- no figure is left out of the estimate sections of the report rather than
+-- counted as zero.
+alter table public.stage_log alter column actual_days drop not null;
+
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
 -- overtime. Days with no row follow the default, so this table stays small.
