@@ -702,10 +702,10 @@ export default function App() {
         <div className="title">Shop schedule <span>· scheduled backward from delivery</span></div>
         <div className="stats">
           <div className="views">
-            {['board', 'table', ...(trackingEnabled && SHOW_REPORT ? ['report'] : [])].map((v) => (
+            {['board', 'table', 'calendar', ...(trackingEnabled && SHOW_REPORT ? ['report'] : [])].map((v) => (
               <button key={v} className={view === v ? 'on' : ''}
                 onClick={() => { setView(v); setSelected(null) }}>
-                {v === 'board' ? 'Board' : v === 'table' ? 'Table' : 'Report'}
+                {v[0].toUpperCase() + v.slice(1)}
               </button>
             ))}
           </div>
@@ -791,6 +791,10 @@ export default function App() {
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
           projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today}
           sort={sort} onSort={sortBy} />
+      ) : view === 'calendar' ? (
+        <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
+          today={today} tracking={trackingEnabled} selected={selected}
+          onSelect={(id) => setSelected((cur) => (cur === id ? null : id))} />
       ) : (
         <StageReport log={stageLog} jobs={jobs} partsById={partsById}
           stages={stageDateRows} datesEnabled={stageDatesEnabled} />
@@ -1205,6 +1209,121 @@ function ChangePassword({ email, onClose }) {
           </>
         )}
       </form>
+    </div>
+  )
+}
+
+// Deliveries laid out on a month grid. The board answers "when does the work
+// happen"; this answers "what is going out the door in October", which is the
+// question the front office asks and the board is a poor shape for.
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTH = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+
+function CalendarView({ rows, projById, partsById, cal, today, tracking, selected, onSelect }) {
+  const [month, setMonth] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1))
+  const step = (n) => setMonth((m) => new Date(m.getFullYear(), m.getMonth() + n, 1))
+
+  const byDay = useMemo(() => {
+    const m = new Map()
+    rows.forEach((j) => {
+      const k = isoDate(j.delivery)
+      if (!m.has(k)) m.set(k, [])
+      m.get(k).push(j)
+    })
+    m.forEach((list) => list.sort((a, b) =>
+      String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true })))
+    return m
+  }, [rows])
+
+  // Whole weeks, Sunday to Saturday, so the grid is always seven across.
+  const cells = useMemo(() => {
+    const first = strip(new Date(month.getFullYear(), month.getMonth(), 1))
+    const last = strip(new Date(month.getFullYear(), month.getMonth() + 1, 0))
+    const out = []
+    for (let d = addDays(first, -first.getDay()); d <= addDays(last, 6 - last.getDay()); d = addDays(d, 1)) out.push(d)
+    return out
+  }, [month])
+
+  const inMonth = rows.filter((j) => j.delivery.getFullYear() === month.getFullYear()
+    && j.delivery.getMonth() === month.getMonth())
+  const slipping = tracking
+    ? inMonth.filter((j) => { const p = projById.get(j.id); return p && p.slipping }).length
+    : inMonth.filter((j) => j.late).length
+  // Where the work actually is, so "nothing this month" doesn't look like a bug
+  // when every delivery is a month either side of the one being looked at.
+  const near = useMemo(() => {
+    const ms = rows.map((j) => j.delivery).sort((a, b) => a - b)
+    return { first: ms[0] || null, last: ms[ms.length - 1] || null }
+  }, [rows])
+  const todayT = today.getTime()
+
+  return (
+    <div className="calwrap">
+      <div className="calhead">
+        <div className="calnav">
+          <button className="btn sm" onClick={() => step(-1)} aria-label="Previous month">‹</button>
+          <h3>{MONTH(month)}</h3>
+          <button className="btn sm" onClick={() => step(1)} aria-label="Next month">›</button>
+          <button className="btn sm" onClick={() => setMonth(new Date(today.getFullYear(), today.getMonth(), 1))}>
+            Today
+          </button>
+        </div>
+        <div className="calstats">
+          <div><b>{inMonth.length}</b> {inMonth.length === 1 ? 'delivery' : 'deliveries'} this month</div>
+          {tracking && <div className={slipping ? 'bad' : ''}><b>{slipping}</b> not projected to make it</div>}
+          {inMonth.length === 0 && near.first && (
+            <div className="muted">
+              Deliveries run {fmt(near.first)} to {fmt(near.last)}
+              {near.last.getFullYear() !== today.getFullYear() ? ` ${near.last.getFullYear()}` : ''}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="calgrid">
+        {DOW.map((d) => <div key={d} className="caldow">{d}</div>)}
+        {cells.map((d) => {
+          const list = byDay.get(isoDate(d)) || []
+          const other = d.getMonth() !== month.getMonth()
+          const off = !cal.isWorkday(d)
+          return (
+            <div key={isoDate(d)}
+              className={`calcell${other ? ' other' : ''}${off ? ' off' : ''}${d.getTime() === todayT ? ' today' : ''}`}>
+              <div className="caldate">{d.getDate()}
+                {/* Only days set by hand get a word. Every Saturday being
+                    labelled "closed" is noise; a closed Thanksgiving, or a
+                    Saturday opened for overtime, is the thing worth reading. */}
+                {!other && cal.isOverridden(d) && (
+                  <span className={`calclosed${off ? '' : ' on'}`}
+                    title={off ? 'Shop closed this day' : 'Shop open this day'}>
+                    {off ? 'closed' : 'open'}
+                  </span>
+                )}
+              </div>
+              {list.map((j) => {
+                const p = projById.get(j.id)
+                const late = tracking ? p && p.slipping : j.late
+                const done = tracking && p && p.complete
+                const pn = (partsById.get(j.partId) || {}).part_number
+                return (
+                  <button key={j.id} type="button"
+                    className={`dlv${late ? ' slip' : ''}${done ? ' done' : ''}${selected === j.id ? ' sel' : ''}`}
+                    onClick={() => onSelect(j.id)}
+                    title={`${j.unit}${j.desc ? ` — ${j.desc}` : ''}\nDue ${fmt(j.delivery)}`
+                      + (tracking && p && p.projectedEnd ? `\nProjected ${fmt(p.projectedEnd)}` : '')
+                      + (late ? ` — ${p ? p.variance : j.lateDays} working days late` : '')}>
+                    <span className="u">{j.unit}</span>
+                    {late && <span className="v">+{p ? p.variance : j.lateDays}d</span>}
+                    {(pn || j.desc) && <span className="m">{pn || j.desc}</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
+      <p className="calfoot">Each unit sits on the date it is due out. Click one to open it below.
+        Days the shop is closed are shaded — a delivery landing on one is worth a second look.</p>
     </div>
   )
 }
@@ -1712,6 +1831,45 @@ function Style() {
     .since input { padding-block: 4px; }
     .sincedays { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; padding-left: 8px; }
     .sincedays.bad { color: #B3382E; font-weight: 600; }
+    /* delivery calendar */
+    .calwrap { margin: 0 24px 24px; }
+    .calhead { display: flex; flex-wrap: wrap; gap: 10px 26px; align-items: center; justify-content: space-between;
+      background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px 6px 0 0; border-bottom: 0; padding: 10px 14px; }
+    .calnav { display: flex; align-items: center; gap: 8px; }
+    .calnav h3 { margin: 0; font-size: 15px; font-weight: 700; min-width: 168px; }
+    .calstats { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: baseline; font-size: 13px; color: #3A434B; }
+    .calstats b { font-size: 15px; font-variant-numeric: tabular-nums; }
+    .calstats .bad b { color: #B3382E; }
+    .calgrid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+      border: 1px solid #D4D9DC; border-radius: 0 0 6px 6px; overflow: hidden; background: #D4D9DC; gap: 1px; }
+    .caldow { background: #F6F8F9; font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: #7A848C; padding: 7px 9px; }
+    .calcell { background: #FFF; min-height: 104px; padding: 5px 5px 7px; display: flex; flex-direction: column; gap: 3px; }
+    .calcell.other { background: #FAFBFB; }
+    .calcell.other .caldate { color: #B8C0C6; }
+    .calcell.off { background: #F3F5F6; }
+    .calcell.off.other { background: #F7F8F9; }
+    .calcell.today { box-shadow: inset 0 0 0 2px #1B2126; }
+    .caldate { font-size: 11px; font-weight: 700; color: #5B6670; display: flex; align-items: baseline;
+      justify-content: space-between; gap: 6px; padding: 1px 2px 2px; }
+    .calcell.today .caldate { color: #1B2126; }
+    .calclosed { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #9AA4AB; }
+    .calclosed.on { color: #3E7C59; }
+    .dlv { display: block; width: 100%; text-align: left; font-family: inherit; cursor: pointer;
+      border: 1px solid #C6CDD1; border-left: 3px solid #5B6670; background: #FFF; border-radius: 3px;
+      padding: 3px 6px; line-height: 1.3; }
+    .dlv:hover { background: #F6F8F9; }
+    .dlv.sel { background: #EDF2F6; border-color: #44688F; border-left-color: #44688F; }
+    .dlv.slip { border-left-color: #B3382E; }
+    .dlv.done { border-left-color: #3E7C59; }
+    .dlv .u { font-size: 12px; font-weight: 700; color: #1B2126; }
+    .dlv .v { font-size: 10px; font-weight: 700; color: #B3382E; margin-left: 5px; }
+    .dlv .m { display: block; font-size: 10px; color: #7A848C; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .calfoot { margin: 8px 0 0; font-size: 11px; color: #7A848C; line-height: 1.5; max-width: 76ch; }
+    @media (max-width: 860px) {
+      .calcell { min-height: 78px; }
+      .dlv .m { display: none; }
+    }
     /* stage report */
     .reportwrap { margin: 0 24px 24px; display: flex; flex-direction: column; gap: 18px; }
     .rephead { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 14px 18px; font-size: 13px; color: #3A434B; }

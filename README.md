@@ -91,6 +91,21 @@ Clearing both dates on a closed station deletes its log row. Setting only one le
 
 Stations closed before those two columns existed keep whatever the log has — usually a finish date and no start. Filling in the start writes both down properly and recounts the days from them.
 
+### The calendar
+
+The **Calendar** view is the same book read by date out the door rather than by work in the shop.
+Each unit sits on a month grid on the day it is due, with its work-order number, its part number (or
+description), and how many working days late the projection says it will be. Clicking one opens it
+in the panel below, the same as clicking a row on the board.
+
+Days the shop is closed are shaded. Only days set by hand carry a word — a closed Thanksgiving reads
+**closed** and a Saturday opened for overtime reads **open** — because labelling every Saturday
+would bury the one that matters. A delivery landing on a shaded day is worth a second look.
+
+The header counts the month's deliveries and how many of them the projection says will miss. With no
+deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
+read as a broken one.
+
 ### Placing a stage by hand
 
 The scheduler picks every date. When it picks wrong — and it will, because it doesn't know the
