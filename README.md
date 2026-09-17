@@ -91,7 +91,9 @@ Clearing both dates on a closed station deletes its log row. Setting only one le
 
 Stations closed before those two columns existed keep whatever the log has — usually a finish date and no start. Filling in the start writes both down properly and recounts the days from them.
 
-On the board each row carries two lanes: the plan on top (outlined), and where the remaining work actually lands underneath (solid, red when it runs past the target). The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
+On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
+
+Colour says *which station*, and nothing else. How late a unit is running is the red `+Nd` flag beside its work-order number, and how far its bars run past the ▼ delivery mark.
 
 Two things worth knowing about the semantics:
 

@@ -1399,14 +1399,18 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
             style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color }} />
         })}
-        {/* lower lane: where the remaining work actually lands */}
+        {/* lower lane: where the remaining work actually lands. Same colour as
+            the plan above it, filled solid rather than outlined, so the pair
+            reads as one station in two states. Colour says which station; how
+            late a unit is running is the flag on its label and how far its bars
+            run past the delivery mark. */}
         {tracking && proj && (underway(j) || proj.slipping) && OPS.map((o) => {
           const s = proj.spans[o.key]
           if (!s) return null
           const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          return <div key={`p-${o.key}`} className={`bar proj ${proj.slipping ? 'slip' : ''}`}
+          return <div key={`p-${o.key}`} className="bar proj"
             title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
-            style={{ left: x + 1, width: w - 3, background: proj.slipping ? '#B3382E' : o.color }} />
+            style={{ left: x + 1, width: w - 3, background: o.color }} />
         })}
         <div className="delmark" style={{ left: dayIndex(j.delivery) * COL + COL / 2 }} />
       </div>
