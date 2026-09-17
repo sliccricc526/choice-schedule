@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog or production tracking existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking or pinned stages existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -90,6 +90,40 @@ What can be corrected depends on the station:
 Clearing both dates on a closed station deletes its log row. Setting only one leaves the days it took unknown: the row keeps the date but records no figure, and the estimate sections of the report leave it out rather than counting it as zero. It still appears in the stage-date table, so it is visible rather than silently dropped.
 
 Stations closed before those two columns existed keep whatever the log has — usually a finish date and no start. Filling in the start writes both down properly and recounts the days from them.
+
+### Placing a stage by hand
+
+The scheduler picks every date. When it picks wrong — and it will, because it doesn't know the
+north bay is tied up or that this trailer has to go on the truck Thursday — drag the stage where it
+belongs on the **planned** (upper) lane:
+
+- **Drag the middle** of a bar to move that stage. It lands where you drop it.
+- **Drag either edge** to change how long the stage takes. The right edge keeps the start put and
+  stretches the finish; the left edge keeps the finish put and moves the start. Either writes the
+  station's day count for that unit.
+
+A dragged stage is **pinned**: it keeps a heavier border and a dot, the scheduler stops choosing its
+dates, and everything else — this unit's other stages, and every other unit in the shop — is planned
+around it. Pins are claimed before anything is scheduled automatically, so a pin always wins.
+
+Resizing pins too. That is deliberate: the plan is built *backward* from the delivery date, so its
+finish is the anchored edge. Change only the day count and the scheduler re-places the bar, which
+means dragging the right edge rightwards would grow the bar leftwards. Pinning makes the bar end up
+where the gesture put it, every time.
+
+The unit panel lists what has been placed by hand and releases it — one stage at a time, or
+**Release all**, which hands it all back to the scheduler.
+
+Two things a pin is allowed to do, because refusing would be worse than reporting:
+
+- **Go over capacity.** Three trailers pinned onto one paint day with a cap of one all stay put, and
+  the load row goes red. You said so on purpose; the board's job is to show you what it costs.
+- **Break the sequence.** Paint pinned across the back of fabrication stays where you put it and the
+  unit is flagged **OVERLAP**. Nothing is quietly resequenced behind you.
+
+Dragging changes the day fabrication has to start, which is what the board sorts on — so rows would
+leap around under the pointer. The board holds its order instead, settling when units are added or
+removed, or when **Re-sort rows** is clicked.
 
 On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
 

@@ -49,6 +49,14 @@ alter table public.jobs
   add column if not exists days_left int check (days_left is null or days_left >= 0),
   add column if not exists updated_at timestamptz not null default now();
 
+-- Stages placed by hand, by dragging them on the board. A pinned stage keeps
+-- the date it was dropped on and the scheduler works everything else around it;
+-- null means the scheduler is free to choose, which is the default for all three.
+alter table public.jobs
+  add column if not exists fab_pinned_start date,
+  add column if not exists paint_pinned_start date,
+  add column if not exists asm_pinned_start date;
+
 -- Planned against actual, kept as each station closes, so estimates can be
 -- checked against what the trailers really took.
 create table if not exists public.stage_log (

@@ -3,7 +3,7 @@ import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
-  workdaysInclusive,
+  workdaysInclusive, hasPins,
 } from './engine.js'
 
 const COL = 26
@@ -39,6 +39,9 @@ export default function App() {
   const [view, setView] = useState('board')
   // False until the tracking columns exist on jobs, so the board still runs without them.
   const [trackingEnabled, setTrackingEnabled] = useState(true)
+  // Same for the pinned-stage columns: without them the board still schedules,
+  // it just can't be overruled by dragging.
+  const [pinsEnabled, setPinsEnabled] = useState(true)
   // Closed stations, planned against actual. Empty until a station is closed.
   const [stageLog, setStageLog] = useState([])
   // False until stage_log carries started_on/finished_on, so closing a station
@@ -61,7 +64,9 @@ export default function App() {
         return
       }
       const jrows = jr.data || []
-      setTrackingEnabled(jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], 'stage'))
+      const has = (k) => jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], k)
+      setTrackingEnabled(has('stage'))
+      setPinsEnabled(has('fab_pinned_start'))
       setJobs(jrows.map((r) => ({
         id: r.id, unit: r.unit, desc: r.description || '',
         delivery: parseDate(r.delivery_date),
@@ -70,6 +75,12 @@ export default function App() {
         stage: r.stage || 'none',
         stageStarted: r.stage_started ? parseDate(r.stage_started) : null,
         daysLeft: r.days_left == null ? null : r.days_left,
+        // Stages the shop has placed by hand; absent keys mean the scheduler chooses.
+        pins: OPS.reduce((m, o) => {
+          const v = r[`${o.key}_pinned_start`]
+          if (v) m[o.key] = parseDate(v)
+          return m
+        }, {}),
       })))
       const c = { fab: 2, paint: 1, asm: 2 }
       ;(cr.data || []).forEach((r) => { c[r.station] = r.cap })
@@ -186,6 +197,9 @@ export default function App() {
     if (patch.stage !== undefined) row.stage = patch.stage
     if (patch.stageStarted !== undefined) row.stage_started = patch.stageStarted ? isoDate(patch.stageStarted) : null
     if (patch.daysLeft !== undefined) row.days_left = patch.daysLeft
+    if (patch.pins !== undefined) OPS.forEach((o) => {
+      row[`${o.key}_pinned_start`] = patch.pins[o.key] ? isoDate(patch.pins[o.key]) : null
+    })
     const { error: e } = await supabase.from('jobs').update(row).eq('id', id)
     pendingWrites.current = Math.max(0, pendingWrites.current - 1)
     if (e) { setError(e.message); load() }
@@ -408,6 +422,53 @@ export default function App() {
     }
   }, [jobs, caps, leveled, today, cal])
 
+  // Dragging a planned bar places that stage by hand: the middle of the bar
+  // moves it, either edge stretches it.
+  //
+  // Every drag pins, resizes included. The alternative — resize the days and let
+  // the scheduler re-place the bar — reads as a bug: the plan is built backward
+  // from the delivery date, so its end is the anchored edge, and dragging the
+  // right edge rightwards would grow the bar leftwards instead. Pinning means
+  // the stage ends up exactly where it was dropped, every time.
+  const dragStage = useCallback((jobId, key, mode, deltaDays) => {
+    if (!pinsEnabled) return
+    const job = jobs.find((j) => j.id === jobId)
+    const sched = scheduled.find((j) => j.id === jobId)
+    if (!job || !sched) return
+    const span = sched.spans[key]
+    // A stage cannot begin on a day the shop is shut, so a bar dropped on one
+    // takes the nearest working day *in the direction it was dragged*. Always
+    // rounding forward would cancel a small drag to the left outright: two days
+    // back off a Monday is a Saturday, which would round straight back to the
+    // Monday it came from.
+    const onWork = (d, dir) => (cal.isWorkday(d) ? strip(d)
+      : dir < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d))
+    let start = span.start
+    let dur = Math.max(1, job[key] || 1)
+    if (mode === 'move') {
+      start = onWork(addDays(span.start, deltaDays), deltaDays)
+    } else if (mode === 'end') {
+      const end = addDays(span.end, deltaDays)
+      dur = workdaysInclusive(span.start, end < span.start ? span.start : end, cal)
+    } else {
+      const moved = onWork(addDays(span.start, deltaDays), deltaDays)
+      start = moved > span.end ? strip(span.end) : moved
+      dur = workdaysInclusive(start, span.end, cal)
+    }
+    saveJob(jobId, {
+      pins: { ...job.pins, [key]: start },
+      ...(Math.max(1, dur) === job[key] ? {} : { [key]: Math.max(1, dur) }),
+    })
+  }, [jobs, scheduled, cal, pinsEnabled, saveJob])
+
+  // Hand a stage back to the scheduler.
+  const releasePin = useCallback((job, key) => {
+    const pins = { ...job.pins }
+    delete pins[key]
+    saveJob(job.id, { pins })
+  }, [saveJob])
+  const releaseAllPins = useCallback((job) => saveJob(job.id, { pins: {} }), [saveJob])
+
   // Where the work actually lands: remaining work pushed forward from today.
   // The plan above says when work *should* happen; this says when it will.
   const { projected, projectError } = useMemo(() => {
@@ -463,9 +524,13 @@ export default function App() {
   const { days, months } = useMemo(() => {
     let min = today, max = addDays(today, 14)
     scheduled.forEach((j) => {
-      if (j.spans.fab.start < min) min = j.spans.fab.start
+      // Any stage can be pinned anywhere, so every span counts towards the
+      // window — not just fabrication at the front and assembly at the back.
+      OPS.forEach((o) => {
+        if (j.spans[o.key].start < min) min = j.spans[o.key].start
+        if (j.spans[o.key].end > max) max = j.spans[o.key].end
+      })
       if (j.delivery > max) max = j.delivery
-      if (j.spans.asm.end > max) max = j.spans.asm.end
     })
     projected.forEach((p) => { if (p.projectedEnd && p.projectedEnd > max) max = p.projectedEnd })
     min = addDays(min, -3)
@@ -537,7 +602,26 @@ export default function App() {
     }).map((j) => j.id))
   }, [])
 
+  // The board sorts by the day fabrication has to start, which is exactly the
+  // thing a drag changes — so left live, the row being dragged would leap to a
+  // different place on the board the moment the pointer came up. Hold the order
+  // and settle it when the units themselves change, the way the table does.
+  const [boardOrder, setBoardOrder] = useState([])
+  const resettleBoard = useCallback(() => {
+    setBoardOrder(scheduledRef.current.slice()
+      .sort((a, b) => a.mustStart - b.mustStart
+        || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true }))
+      .map((j) => j.id))
+  }, [])
+  const boardRows = useMemo(() => {
+    const byId = new Map(scheduled.map((j) => [j.id, j]))
+    const ordered = boardOrder.map((id) => byId.get(id)).filter(Boolean)
+    const seen = new Set(ordered.map((j) => j.id))
+    return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
+  }, [scheduled, boardOrder])
+
   const idKey = scheduled.map((j) => j.id).sort().join(',')
+  useEffect(() => { resettleBoard() }, [idKey, resettleBoard])
   useEffect(() => { resortTable() }, [view, idKey, sort, resortTable])
 
   // Clicking the sorted column flips it. Variance and the day counts open
@@ -655,10 +739,16 @@ export default function App() {
         <div><span className="chip todaychip" />Today</div>
         <div>▼ Delivery</div>
         {trackingEnabled && <div><span className="lanekey" />Plan over projection</div>}
+        {pinsEnabled && <div><span className="chip pinchipkey" />Placed by hand</div>}
         <div><span className="chip offchip" />Shop closed</div>
+        <button className="btn sm" onClick={resettleBoard}
+          title="Order the rows by the day fabrication has to start">Re-sort rows</button>
         {calendarEnabled
           ? <div className="hint">Click any date to close or open that day</div>
           : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
+        {pinsEnabled
+          ? <div className="hint">Drag a planned bar to place a stage by hand, or an edge to change its days</div>
+          : <div className="hint bad">Dragging stages needs the <code>*_pinned_start</code> columns on <code>jobs</code> — see supabase/schema.sql</div>}
       </div>
 
       <div className="boardwrap">
@@ -680,9 +770,10 @@ export default function App() {
             )
           })}
 
-          {scheduled.map((j) => (
+          {boardRows.map((j) => (
             <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
               pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
+              onDragStage={pinsEnabled ? dragStage : undefined}
               selected={selected === j.id}
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
@@ -784,6 +875,23 @@ export default function App() {
                 above and gets its finish when you close it. Clearing both dates forgets that
                 station's dates altogether — unknown is not zero.
                 {!stageDatesEnabled && ' Correcting a closed station needs the started_on and finished_on columns on stage_log — see supabase/schema.sql.'}</p>
+            </div>
+          )}
+          {pinsEnabled && hasPins(sel) && (
+            <div className="pinline">
+              <span>Placed by hand — the scheduler works around these rather than choosing their dates:</span>
+              <span className="pins">
+                {OPS.filter((o) => sel.pins && sel.pins[o.key]).map((o) => (
+                  <span key={o.key} className="pintag" style={{ borderColor: o.color, color: o.color }}>
+                    {SHORT[o.key]} {fmt(sel.spans[o.key].start)}
+                    <button onClick={() => releasePin(sel, o.key)}
+                      title={`Hand ${o.label.toLowerCase()} back to the scheduler`}>×</button>
+                  </span>
+                ))}
+                <button className="btn sm" onClick={() => releaseAllPins(sel)}>Release all</button>
+              </span>
+              {sel.conflict && <span className="bad">A stage sits across one that has to come before
+                it. Move it, or release the pin.</span>}
             </div>
           )}
           {selDrift && (
@@ -1373,13 +1481,38 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
 
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
-function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect }) {
+function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage }) {
+  // The drag in progress, held on the row so a pointer move repaints one row
+  // rather than the whole board. It is a preview only — nothing is written
+  // until the pointer comes up, so a drag can be abandoned by putting the bar
+  // back where it came from.
+  const [drag, setDrag] = useState(null)
+  const snap = drag ? Math.round(drag.dx / COL) * COL : 0
+
+  const down = (e, key) => {
+    if (!onDragStage || e.button) return
+    const g = e.target.classList
+    const mode = g.contains('grip') ? (g.contains('l') ? 'start' : 'end') : 'move'
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setDrag({ key, mode, x0: e.clientX, dx: 0 })
+  }
+  const move = (e) => setDrag((d) => (d ? { ...d, dx: e.clientX - d.x0 } : d))
+  const up = () => setDrag((d) => {
+    if (d) {
+      const n = Math.round(d.dx / COL)
+      if (n !== 0) onDragStage(j.id, d.key, d.mode, n)
+    }
+    return null
+  })
+
   return (
     <>
       <div className={`rowlabel ${selected ? 'sel' : ''}`} onClick={onSelect}>
         <div className="unit">{j.unit}
           {tracking && proj && proj.slipping && <span className="flag">+{proj.variance}d</span>}
           {!tracking && j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}
+          {j.conflict && <span className="flag seq" title="A stage is pinned across one that has to come before it. Move it, or release the pin.">OVERLAP</span>}
         </div>
         <div className="desc" title={`${pn ? `${pn} · ` : ''}${j.desc ? `${j.desc} · ` : ''}deliver ${fmt(j.delivery)}`}>
           {pn && <span className="pntag">{pn}</span>}{j.desc ? `${j.desc} · ` : ''}deliver {fmt(j.delivery)}
@@ -1391,13 +1524,31 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             <div key={i} className={`cell ${!cal.isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
           ))}
         </div>
-        {/* upper lane: the plan the unit was sold on */}
+        {/* upper lane: the plan the unit was sold on — and the lane you drag */}
         {OPS.map((o) => {
           const s = j.spans[o.key]
-          const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          return <div key={o.key} className={`bar plan ${j.late && o.key === 'fab' ? 'latefab' : ''}`}
-            title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
-            style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color }} />
+          let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
+          const live = drag && drag.key === o.key
+          if (live) {
+            if (drag.mode === 'move') x += snap
+            else if (drag.mode === 'end') w = Math.max(COL, w + snap)
+            // the left edge stretches the bar while its far end stays put
+            else { const d = Math.min(snap, w - COL); x += d; w -= d }
+          }
+          const pinned = Boolean(j.pins && j.pins[o.key])
+          return <div key={o.key}
+            className={`bar plan${j.late && o.key === 'fab' ? ' latefab' : ''}`
+              + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
+            onPointerDown={onDragStage ? (e) => down(e, o.key) : undefined}
+            onPointerMove={onDragStage ? move : undefined}
+            onPointerUp={onDragStage ? up : undefined}
+            onPointerCancel={onDragStage ? up : undefined}
+            title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
+              + (pinned ? ' — placed by hand' : '')
+              + (onDragStage ? '. Drag to move it, drag an edge to change how long it takes.' : '')}
+            style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
+            {onDragStage && <><span className="grip l" /><span className="grip r" /></>}
+          </div>
         })}
         {/* lower lane: where the remaining work actually lands. Same colour as
             the plan above it, filled solid rather than outlined, so the pair
@@ -1510,6 +1661,26 @@ function Style() {
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
     .bar.proj { top: 24px; height: 13px; }
     .bar.latefab { outline: 2px solid #B3382E; }
+    /* the plan is the lane you drag: move from the middle, stretch from an edge */
+    .bar.plan.draggable { cursor: grab; touch-action: none; }
+    .bar.plan.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
+    .bar.plan.pinned { border-width: 2px; }
+    .bar.plan.pinned::after { content: ''; position: absolute; left: 3px; top: 50%; margin-top: -2px;
+      width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+    .grip { position: absolute; top: -2px; bottom: -2px; width: 7px; cursor: col-resize; }
+    .grip.l { left: -3px; } .grip.r { right: -3px; }
+    .bar.plan.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
+    .flag.seq { background: #96581F; }
+    .pinchipkey { background: #FFF; border: 2px solid #5B6670; box-sizing: border-box; }
+    .pinline { margin: 14px 0 4px; padding: 10px 12px; background: #F9FAFB; border: 1px solid #E4E8EA;
+      border-radius: 5px; font-size: 12px; color: #5B6670; display: flex; flex-direction: column; gap: 8px; }
+    .pinline .bad { color: #B3382E; font-weight: 600; }
+    .pinline .pins { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .pintag { display: inline-flex; align-items: center; gap: 4px; border: 1px solid; border-radius: 3px;
+      padding: 2px 4px 2px 7px; font-weight: 600; font-variant-numeric: tabular-nums; background: #FFF; }
+    .pintag button { border: 0; background: none; cursor: pointer; color: inherit; font-size: 14px;
+      line-height: 1; padding: 0 3px; border-radius: 2px; }
+    .pintag button:hover { background: rgba(0,0,0,.1); }
     .lanekey { width: 14px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -2px;
       background: linear-gradient(#E3EAF2 0 50%, #44688F 50% 100%); border: 1px solid #44688F; }
     /* stage chips */
