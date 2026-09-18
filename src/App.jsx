@@ -684,7 +684,12 @@ export default function App() {
   }, [panning])
 
   const idKey = scheduled.map((j) => j.id).sort().join(',')
-  useEffect(() => { resettleBoard() }, [idKey, resettleBoard])
+  // Levelling recomputes the day every unit has to start, which is the very
+  // thing the rows are ordered by, so the order has to settle again with it.
+  // Holding it is there to stop a row leaping away mid-drag; a toggle that
+  // rebuilds the whole plan is not a drag, and leaving the old order in place
+  // just leaves the board looking shuffled.
+  useEffect(() => { resettleBoard() }, [idKey, leveled, resettleBoard])
   useEffect(() => { resortTable() }, [view, idKey, sort, resortTable])
 
   // Clicking the sorted column flips it. Variance and the day counts open
