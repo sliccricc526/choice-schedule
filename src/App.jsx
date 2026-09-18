@@ -740,6 +740,10 @@ export default function App() {
   const selPart = sel ? partsById.get(sel.partId) : null
   const selProj = sel ? projById.get(sel.id) : null
   const selStages = sel ? stagesById.get(sel.id) : null
+  // Days done on the station in progress according to the shop's own days-left,
+  // which is known even when nobody recorded the day the station opened.
+  const selLive = sel && sel.stage !== 'none' && sel.stage !== 'done' ? sel.stage : null
+  const selDone = selLive ? sel[selLive] - (sel.daysLeft == null ? sel[selLive] : sel.daysLeft) : 0
   // A unit whose numbers have been tuned away from its part number's standard.
   const selDrift = selPart && (selPart.description !== sel.desc
     || OPS.some((o) => selPart[`${o.key}_days`] !== sel[o.key]))
@@ -915,8 +919,12 @@ export default function App() {
                   </div>
                   <div className="stageline">
                     {!sel.stageStarted
-                      ? <span>No start date, so the days spent aren't counted. Set it if you know
-                          when this unit went into {STAGE_LABEL[sel.stage].toLowerCase()}.</span>
+                      ? <span>
+                          {selDone > 0
+                            ? `${selDone} of ${sel[sel.stage]} days done by the day count, but no start date, `
+                            : 'No start date, '}
+                          so the days spent aren't counted. Set it if you know when this unit went
+                          into {STAGE_LABEL[sel.stage].toLowerCase()}.</span>
                       : selProj && selProj.spent > sel[sel.stage]
                         ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
                         : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
@@ -1141,6 +1149,12 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
             const live = j.stage || 'none'
             const planned = live === 'none' || live === 'done' ? 0 : j[live]
             const over = planned > 0 && p && p.spent > planned
+            // Days already done, taken from what the shop says is left rather
+            // than from the calendar. A unit put on the board part-way through a
+            // station has no start date — the normal case when tracking begins —
+            // but its days-left still says work has happened, and reporting the
+            // whole booking instead would call the row untouched.
+            const done = planned > 0 ? planned - (j.daysLeft == null ? planned : j.daysLeft) : 0
             const vr = variance(p)
             return (
               <tr key={j.id} className={p && p.slipping ? 'late' : ''}>
@@ -1169,7 +1183,9 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                           title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
                           onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
                         <span className={`sincedays ${over ? 'bad' : ''}`}>
-                          {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}` : `not set · ${planned} d booked`}
+                          {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}`
+                            : done > 0 ? `${done} of ${planned} d done · no start date`
+                            : `not started · ${planned} d booked`}
                         </span>
                       </div>
                     ) : <span className="calc">—</span>}
