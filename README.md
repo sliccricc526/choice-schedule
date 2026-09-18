@@ -15,7 +15,9 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog or production tracking existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking or pinned stages existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+
+The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
 ### 2. Local dev
 ```bash
@@ -53,21 +55,108 @@ The board knows three things about each unit: which station it's on (**Stage**),
 - **Projected** — the unit's remaining work scheduled *forward* from today against the same station capacities. Work already on the floor can't be pushed back into the past, so a unit under way starts now. That's what makes the projection differ from the plan.
 - **Variance** — projected finish against the target date, in working days. `+3d late` means it lands three working days past its date; `4d slack` means there's that much room before it.
 
-Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days — **unless the station has no start date**, in which case nothing is recorded. The days it took are unknown, not zero, and logging zero would teach the report that the station takes no time at all.
+Click a stage chip in the table, or use **Move to …** in the unit panel, to close a station and open the next. Closing one writes a `stage_log` row with its planned and actual days, and with the dates behind them — the day the unit went into the station and the day it came out — **unless the station has no start date**, in which case nothing is recorded. The days it took are unknown, not zero, and logging zero would teach the report that the station takes no time at all.
 
 That is the normal case for units already on the floor when tracking begins: you often can't say when their current station started. Leave the date blank rather than guessing. Those units go uncounted for the station they're on now and start counting at the next one, which does begin under the app.
 
-### The report
+### The report — switched off
 
-The **Report** view reads that log back three ways:
+The shop is using this as a scheduling tool, not to run time studies, so the **Report** tab is
+hidden: `SHOW_REPORT` at the top of `src/App.jsx` is `false`. Stations carry on recording their
+planned and actual days as they close, so the history is accumulating for the day it is wanted —
+set the flag to `true` and the tab comes back with everything that has been logged since.
+
+What it shows when it is on, four ways:
 
 - **By station** — how fabrication, paint and assembly each run against their estimates on average. The rule on each bar is what was booked and the fill is what it took, so a fill past the rule is an overrun.
 - **By model** — booked against took, per station, grouped by part number (or by the unit's description where it has no part number). This is the one that answers whether an 80-ton RGN really takes twelve fab days.
-- **Recent closures** — the last 25 stations closed, with the difference on each.
+- **Stage dates — planned against actual** — every unit's three stations with planned start, planned finish, actual start and actual finish side by side, and the working-day difference on each end. A station still open shows where the projection now puts its finish, marked `proj`, rather than a blank. The same four dates are in the unit panel on the board and table views, for one unit at a time — that half is **not** hidden, because knowing when a unit is due into paint is scheduling rather than reporting. It is also where the dates are edited; this table is read-only.
+- **Recent closures** — the last 25 stations closed, with the difference on each and the dates it ran between.
 
 Percentages are computed on totals rather than averaged, so a long station counts for more than a short one. A model's figures follow the part number a unit carries *now*, so re-tagging a unit moves its history with it.
 
-On the board each row carries two lanes: the plan on top (outlined), and where the remaining work actually lands underneath (solid, red when it runs past the target). The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
+The *planned* dates on the stage-date table are the plain just-in-time plan — straight back from the delivery date, capacity ignored. That is deliberate, and it is **not** the levelled plan the board draws when **Level to capacity** is on. Levelling books no work earlier than today, so for a station that has already run it would invent a planned date in the future and the comparison would be meaningless. Just-in-time is defined in the past as well as the future: the latest that station could have run and still made delivery. It also means the table doesn't shift under you when the levelling toggle is flipped. A negative start difference therefore reads as *the station opened earlier than it strictly had to*, not as a problem.
+
+### Correcting the actual dates
+
+Actual dates are stamped as a station closes, which is right when someone clicks **Move to …** the same day and wrong when they click it a week later. They can be corrected in the unit panel, on the board or table view, by typing into the stage-date table there.
+
+What can be corrected depends on the station:
+
+- **Closed** — both dates. The days it took are recounted from them and written back to the log, so the recorded figures can never drift away from the dates shown beside them.
+- **On now** — the start only, which is the same value as **In stage since** and **Went into …**; editing either moves the other. It has no finish until it is closed, and closing it is what sets one — a date field that closed a station behind your back would be a nasty surprise.
+- **Not started** — neither. Nothing has happened to record.
+
+Clearing both dates on a closed station deletes its log row. Setting only one leaves the days it took unknown: the row keeps the date but records no figure, and the estimate sections of the report leave it out rather than counting it as zero. It still appears in the stage-date table, so it is visible rather than silently dropped.
+
+Stations closed before those two columns existed keep whatever the log has — usually a finish date and no start. Filling in the start writes both down properly and recounts the days from them.
+
+### The calendar
+
+The **Calendar** view is the same book read by date out the door rather than by work in the shop.
+Each unit sits on a month grid on the day it is due, with its work-order number, its part number (or
+description), and how many working days late the projection says it will be. Clicking one opens it
+in the panel below, the same as clicking a row on the board.
+
+Days the shop is closed are shaded. Only days set by hand carry a word — a closed Thanksgiving reads
+**closed** and a Saturday opened for overtime reads **open** — because labelling every Saturday
+would bury the one that matters. A delivery landing on a shaded day is worth a second look.
+
+The header counts the month's deliveries and how many of them the projection says will miss. With no
+deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
+read as a broken one.
+
+### Moving around the board
+
+Once a real book is loaded the board runs well past the edge of the screen. Grab any empty part of
+it — a cell, the date row, the station load rows — and pull, the way you would a paper schedule
+across a bench.
+
+Anything that already answers to a drag or a click keeps doing so: the bars place stages, the dates
+open and close the shop, a row label selects its unit. A pan only counts as a pan once the pointer
+has actually moved a few pixels, so a click that wobbles is still a click, and the click that ends a
+real pan is swallowed — dragging across the date row must not close every day it passed over.
+
+On a touch screen the browser's own scrolling is left alone. It does momentum and rubber-banding
+better than this would, and panning as well would move the board twice as far as the finger.
+
+### Placing a stage by hand
+
+The scheduler picks every date. When it picks wrong — and it will, because it doesn't know the
+north bay is tied up or that this trailer has to go on the truck Thursday — drag the stage where it
+belongs on the **planned** (upper) lane:
+
+- **Drag the middle** of a bar to move that stage. It lands where you drop it.
+- **Drag either edge** to change how long the stage takes. The right edge keeps the start put and
+  stretches the finish; the left edge keeps the finish put and moves the start. Either writes the
+  station's day count for that unit.
+
+A dragged stage is **pinned**: it keeps a heavier border and a dot, the scheduler stops choosing its
+dates, and everything else — this unit's other stages, and every other unit in the shop — is planned
+around it. Pins are claimed before anything is scheduled automatically, so a pin always wins.
+
+Resizing pins too. That is deliberate: the plan is built *backward* from the delivery date, so its
+finish is the anchored edge. Change only the day count and the scheduler re-places the bar, which
+means dragging the right edge rightwards would grow the bar leftwards. Pinning makes the bar end up
+where the gesture put it, every time.
+
+The unit panel lists what has been placed by hand and releases it — one stage at a time, or
+**Release all**, which hands it all back to the scheduler.
+
+Two things a pin is allowed to do, because refusing would be worse than reporting:
+
+- **Go over capacity.** Three trailers pinned onto one paint day with a cap of one all stay put, and
+  the load row goes red. You said so on purpose; the board's job is to show you what it costs.
+- **Break the sequence.** Paint pinned across the back of fabrication stays where you put it and the
+  unit is flagged **OVERLAP**. Nothing is quietly resequenced behind you.
+
+Dragging changes the day fabrication has to start, which is what the board sorts on — so rows would
+leap around under the pointer. The board holds its order instead, settling when units are added or
+removed, or when **Re-sort rows** is clicked.
+
+On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. The lower lane only appears once a unit is under way or is already projected late — an untouched unit shows only its plan, because nothing is happening on it yet.
+
+Colour says *which station*, and nothing else. How late a unit is running is the red `+Nd` flag beside its work-order number, and how far its bars run past the ▼ delivery mark.
 
 Two things worth knowing about the semantics:
 

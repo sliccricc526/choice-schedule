@@ -75,19 +75,64 @@ export function createCalendar(overrides) {
 // Weekends off, no closures — used when no calendar is supplied.
 export const defaultCalendar = createCalendar()
 
+// --- Pinned stages ---------------------------------------------------------
+// A stage the shop has placed by hand, by dragging it on the board. The
+// scheduler stops choosing dates for that stage and works the rest of the unit
+// — and the rest of the shop — around it. The foreman knows things the
+// algorithm does not; this is how they say so.
+
+export const pinOf = (job, key) => (job.pins && job.pins[key]) || null
+export const hasPins = (job) => OPS.some((o) => pinOf(job, o.key))
+
+// The block a pinned stage occupies. It runs forward from the pin, because a
+// pin says when the work starts; a pin dropped on a closed day takes the next
+// working one, since nothing runs on a day the shop is shut.
+export function pinnedSpan(job, key, cal = defaultCalendar) {
+  const p = pinOf(job, key)
+  if (!p) return null
+  const start = cal.isWorkday(p) ? strip(p) : cal.nextWorkday(p)
+  const dur = Math.max(1, job[key] || 1)
+  let end = start
+  for (let i = 1; i < dur; i++) end = cal.nextWorkday(end)
+  return { start, end }
+}
+
+// Stations run one after another. A pin can break that — paint pinned to a week
+// before fabrication finishes — and the board says so rather than quietly
+// resequencing the unit behind the shop's back.
+export function stageConflict(spans) {
+  for (let i = 1; i < OPS.length; i++) {
+    const prev = spans[OPS[i - 1].key], cur = spans[OPS[i].key]
+    if (!prev || !cur) continue
+    if (cur.start <= prev.end) return true
+  }
+  return false
+}
+
 // Unconstrained backward schedule: pure just-in-time, ignores capacity.
 export function scheduleJob(job, today, cal = defaultCalendar) {
   let end = cal.onOrBeforeWorkday(job.delivery)
   const spans = {}
   for (let i = OPS.length - 1; i >= 0; i--) {
     const op = OPS[i]
-    const dur = Math.max(1, job[op.key] || 1)
-    const start = cal.backSpan(end, dur)
-    spans[op.key] = { start, end }
-    end = cal.prevWorkday(start)
+    const pinned = pinnedSpan(job, op.key, cal)
+    if (pinned) {
+      spans[op.key] = pinned
+    } else {
+      const dur = Math.max(1, job[op.key] || 1)
+      spans[op.key] = { start: cal.backSpan(end, dur), end }
+    }
+    end = cal.prevWorkday(spans[op.key].start)
   }
   const slack = cal.workdaysBetween(today, spans.fab.start)
-  return { ...job, spans, mustStart: spans.fab.start, slack, late: slack < 0, lateDays: 0 }
+  const dl = cal.onOrBeforeWorkday(job.delivery)
+  const over = spans.asm.end > dl
+  return {
+    ...job, spans, mustStart: spans.fab.start, slack,
+    late: over || slack < 0,
+    lateDays: over ? cal.workdaysBetween(dl, spans.asm.end) : 0,
+    conflict: stageConflict(spans),
+  }
 }
 
 // Capacity-constrained: backward list scheduling, latest-delivery first.
@@ -134,31 +179,85 @@ export function levelSchedule(jobs, caps, today, cal = defaultCalendar) {
     return { start, end: start }
   }
 
+  // Pinned stages are placed before anything is scheduled automatically, and
+  // they keep their days whatever else wants them — including going over
+  // capacity, which the load rows then show in red. The shop put them there on
+  // purpose; the scheduler's job is to work around them, not to overrule them.
+  const pins = new Map()
+  jobs.forEach((job) => {
+    const m = {}
+    OPS.forEach((o) => {
+      const sp = pinnedSpan(job, o.key, cal)
+      if (sp) { m[o.key] = sp; take(o.key, sp.start, sp.end) }
+    })
+    if (OPS.some((o) => m[o.key])) pins.set(job.id, m)
+  })
+
   const ordered = [...jobs].sort((a, b) => b.delivery - a.delivery)
   const out = []
   ordered.forEach((job) => {
+    const pin = pins.get(job.id) || {}
     const dur = {
       fab: Math.max(1, job.fab || 1),
       paint: Math.max(1, job.paint || 1),
       asm: Math.max(1, job.asm || 1),
     }
-    let spans = null, late = false, lateDays = 0
-    const asm = latestBlock('asm', dur.asm, job.delivery, today)
-    const paint = asm && latestBlock('paint', dur.paint, cal.prevWorkday(asm.start), today)
-    const fab = paint && latestBlock('fab', dur.fab, cal.prevWorkday(paint.start), today)
-    if (fab) {
-      spans = { fab, paint, asm }
-    } else {
-      const f = forwardBlock('fab', dur.fab, today)
-      const p = forwardBlock('paint', dur.paint, cal.nextWorkday(f.end))
-      const a = forwardBlock('asm', dur.asm, cal.nextWorkday(p.end))
-      spans = { fab: f, paint: p, asm: a }
-      const dl = cal.onOrBeforeWorkday(job.delivery)
-      if (a.end > dl) { late = true; lateDays = cal.workdaysBetween(dl, a.end) }
+    // Backward pass, latest first, skipping over any stage already pinned. An
+    // unpinned stage may not start before a pinned stage that precedes it has
+    // finished, which is what keeps the sequence intact around a pin.
+    const backward = () => {
+      const got = {}
+      let latestEnd = cal.onOrBeforeWorkday(job.delivery)
+      for (let i = OPS.length - 1; i >= 0; i--) {
+        const key = OPS[i].key
+        if (pin[key]) {
+          got[key] = pin[key]
+        } else {
+          let floor = today
+          for (let k = 0; k < i; k++) {
+            const p = pin[OPS[k].key]
+            if (!p) continue
+            const after = cal.nextWorkday(p.end)
+            if (after > floor) floor = after
+          }
+          const blk = latestBlock(key, dur[key], latestEnd, floor)
+          if (!blk) return null
+          got[key] = blk
+        }
+        latestEnd = cal.prevWorkday(got[key].start)
+      }
+      return got
     }
-    OPS.forEach((o) => take(o.key, spans[o.key].start, spans[o.key].end))
+
+    let spans = backward()
+    if (spans) {
+      OPS.forEach((o) => { if (!pin[o.key]) take(o.key, spans[o.key].start, spans[o.key].end) })
+    } else {
+      // Nowhere to fit between today and delivery: fall forward from today,
+      // still stepping around whatever is pinned.
+      const got = {}
+      let cursor = today
+      OPS.forEach((o) => {
+        if (pin[o.key]) {
+          got[o.key] = pin[o.key]
+        } else {
+          const blk = forwardBlock(o.key, dur[o.key], cursor)
+          got[o.key] = blk
+          take(o.key, blk.start, blk.end)
+        }
+        cursor = cal.nextWorkday(got[o.key].end)
+      })
+      spans = got
+    }
+    // Checked on both paths now: a pinned stage can run past the delivery date
+    // even when everything fitted, which the old fallback-only test missed.
+    const dl = cal.onOrBeforeWorkday(job.delivery)
+    const over = spans.asm.end > dl
     out.push({
-      ...job, spans, late, lateDays,
+      ...job, spans,
+      late: over,
+      lateDays: over ? cal.workdaysBetween(dl, spans.asm.end) : 0,
+      conflict: stageConflict(spans),
       mustStart: spans.fab.start,
       slack: cal.workdaysBetween(today, spans.fab.start),
     })
@@ -199,13 +298,22 @@ export function remainingWork(job) {
   return out
 }
 
+// Working days from a to b counting both ends — what a station took when it
+// opened on a and closed on b. Zero when b falls before a, since a station
+// cannot close before it opens.
+export function workdaysInclusive(a, b, cal = defaultCalendar) {
+  const s = strip(a), e = strip(b)
+  if (e < s) return 0
+  return cal.workdaysBetween(s, e) + (cal.isWorkday(s) ? 1 : 0)
+}
+
 // Working days spent on the station in progress, counting the day it started.
 export function daysSpent(job, today, cal = defaultCalendar) {
   const stage = job.stage || 'none'
   if (stage === 'none' || stage === 'done' || !job.stageStarted) return 0
   const start = strip(job.stageStarted)
   if (start > strip(today)) return 0
-  return cal.workdaysBetween(start, today) + (cal.isWorkday(start) ? 1 : 0)
+  return workdaysInclusive(start, today, cal)
 }
 
 // Where the work actually lands: remaining work scheduled FORWARD from today
@@ -251,7 +359,13 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
     const spans = {}
     let cursor = today, end = null
     work.forEach(({ key, days }) => {
-      const blk = forwardBlock(key, days, cursor)
+      // A stage pinned to a date does not begin before it, even where the floor
+      // happens to be clear sooner — otherwise the plan says one thing and the
+      // projection beside it says another. The station already under way is
+      // exempt: it is running, whatever date was once pinned to it.
+      const pin = job.stage === key ? null : pinOf(job, key)
+      const earliest = pin && strip(pin) > cursor ? strip(pin) : cursor
+      const blk = forwardBlock(key, days, earliest)
       spans[key] = blk
       take(key, blk.start, blk.end)
       cursor = cal.nextWorkday(blk.end)
@@ -271,4 +385,45 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
     })
   })
   return out
+}
+
+// --- Planned against actual dates -----------------------------------------
+// The plan says when a station should run; the stage log says when it really
+// did. This lines the two up station by station for one unit, so the four
+// dates read side by side.
+
+export const STAGE_RANK = { none: 0, fab: 1, paint: 2, asm: 3, done: 4 }
+
+// `plan` is the unit's planned spans, `log` its closed stations keyed by stage
+// ({ started, finished, plannedDays, actualDays }), `proj` its forward
+// projection. Anything not known comes back null rather than guessed: a
+// station closed before the dates were kept has no actual start, and saying so
+// is better than inventing one.
+export function stageDates(job, plan, log, proj, cal = defaultCalendar) {
+  const stage = job.stage || 'none'
+  const rank = STAGE_RANK[stage] || 0
+  const span = (a, b) => (a && b ? cal.workdaysBetween(a, b) : null)
+  return OPS.map((op, i) => {
+    const planned = (plan && plan[op.key]) || null
+    const rec = (log && log[op.key]) || null
+    const active = stage === op.key
+    // Closed once it is logged, or once the unit has moved past it — a stage
+    // set by hand leaves no log row, but the station is still behind the unit.
+    const state = rec || rank > i + 1 ? 'closed' : active ? 'active' : 'pending'
+    const start = (rec && rec.started) || (active ? job.stageStarted || null : null)
+    const finish = (rec && rec.finished) || null
+    return {
+      key: op.key,
+      label: op.label,
+      state,
+      plan: planned,
+      actual: { start, finish },
+      // Where the work is now expected to land, for stations not yet closed.
+      projected: (!rec && proj && proj.spans && proj.spans[op.key]) || null,
+      startVar: span(planned && planned.start, start),
+      finishVar: span(planned && planned.end, finish),
+      plannedDays: rec ? rec.plannedDays : Math.max(1, job[op.key] || 1),
+      actualDays: rec ? rec.actualDays : null,
+    }
+  })
 }

@@ -49,6 +49,14 @@ alter table public.jobs
   add column if not exists days_left int check (days_left is null or days_left >= 0),
   add column if not exists updated_at timestamptz not null default now();
 
+-- Stages placed by hand, by dragging them on the board. A pinned stage keeps
+-- the date it was dropped on and the scheduler works everything else around it;
+-- null means the scheduler is free to choose, which is the default for all three.
+alter table public.jobs
+  add column if not exists fab_pinned_start date,
+  add column if not exists paint_pinned_start date,
+  add column if not exists asm_pinned_start date;
+
 -- Planned against actual, kept as each station closes, so estimates can be
 -- checked against what the trailers really took.
 create table if not exists public.stage_log (
@@ -59,6 +67,23 @@ create table if not exists public.stage_log (
   closed_on date not null default current_date,
   primary key (job_id, stage)
 );
+
+-- The dates behind those durations: when the station really opened and when it
+-- really closed. `closed_on` only ever said when the row was written, which is
+-- the same day for a station closed on time and a lie for one caught up on
+-- later. Rows written before these columns existed keep null starts -- unknown,
+-- not assumed.
+alter table public.stage_log
+  add column if not exists started_on date,
+  add column if not exists finished_on date;
+
+update public.stage_log set finished_on = closed_on where finished_on is null;
+
+-- `actual_days` is derived from those two dates, so it has to be able to say
+-- "not known yet" for a station whose dates are only half filled in. A row with
+-- no figure is left out of the estimate sections of the report rather than
+-- counted as zero.
+alter table public.stage_log alter column actual_days drop not null;
 
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
@@ -104,6 +129,9 @@ alter publication supabase_realtime add table public.jobs;
 alter publication supabase_realtime add table public.station_caps;
 alter publication supabase_realtime add table public.day_overrides;
 alter publication supabase_realtime add table public.part_numbers;
+-- Without this a station closed on one screen leaves the report stale on every
+-- other one until the page is reloaded.
+alter publication supabase_realtime add table public.stage_log;
 
 -- Optional starter data (delete these rows once real units are in):
 insert into public.jobs (unit, description, delivery_date, fab_days, paint_days, asm_days) values

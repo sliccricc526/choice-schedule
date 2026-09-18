@@ -2,13 +2,18 @@ import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
-  isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL,
+  isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
+  workdaysInclusive, hasPins,
 } from './engine.js'
 
 const COL = 26
 const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
-const STAGE_RANK = { none: 0, fab: 1, paint: 2, asm: 3, done: 4 }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+
+// The stage-log report is time study, not scheduling, and the shop is not using
+// it yet. Closures carry on being recorded either way, so the history is there
+// the day it is wanted — set this to true to put the tab back.
+const SHOW_REPORT = false
 
 export default function App() {
   const today = useMemo(() => strip(new Date()), [])
@@ -34,8 +39,14 @@ export default function App() {
   const [view, setView] = useState('board')
   // False until the tracking columns exist on jobs, so the board still runs without them.
   const [trackingEnabled, setTrackingEnabled] = useState(true)
+  // Same for the pinned-stage columns: without them the board still schedules,
+  // it just can't be overruled by dragging.
+  const [pinsEnabled, setPinsEnabled] = useState(true)
   // Closed stations, planned against actual. Empty until a station is closed.
   const [stageLog, setStageLog] = useState([])
+  // False until stage_log carries started_on/finished_on, so closing a station
+  // still works on a database that hasn't had the migration run against it.
+  const [stageDatesEnabled, setStageDatesEnabled] = useState(true)
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -53,7 +64,9 @@ export default function App() {
         return
       }
       const jrows = jr.data || []
-      setTrackingEnabled(jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], 'stage'))
+      const has = (k) => jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], k)
+      setTrackingEnabled(has('stage'))
+      setPinsEnabled(has('fab_pinned_start'))
       setJobs(jrows.map((r) => ({
         id: r.id, unit: r.unit, desc: r.description || '',
         delivery: parseDate(r.delivery_date),
@@ -62,6 +75,12 @@ export default function App() {
         stage: r.stage || 'none',
         stageStarted: r.stage_started ? parseDate(r.stage_started) : null,
         daysLeft: r.days_left == null ? null : r.days_left,
+        // Stages the shop has placed by hand; absent keys mean the scheduler chooses.
+        pins: OPS.reduce((m, o) => {
+          const v = r[`${o.key}_pinned_start`]
+          if (v) m[o.key] = parseDate(v)
+          return m
+        }, {}),
       })))
       const c = { fab: 2, paint: 1, asm: 2 }
       ;(cr.data || []).forEach((r) => { c[r.station] = r.cap })
@@ -73,7 +92,9 @@ export default function App() {
       // The catalog is optional the same way, so the board still runs without it.
       setPartsEnabled(!pr.error)
       setParts(pr.error ? [] : (pr.data || []))
-      setStageLog(sr.error ? [] : (sr.data || []))
+      const srows = sr.error ? [] : (sr.data || [])
+      setStageLog(srows)
+      if (srows.length) setStageDatesEnabled(Object.prototype.hasOwnProperty.call(srows[0], 'started_on'))
       setStatus('ready')
     } catch (err) {
       setStatus('error')
@@ -176,6 +197,9 @@ export default function App() {
     if (patch.stage !== undefined) row.stage = patch.stage
     if (patch.stageStarted !== undefined) row.stage_started = patch.stageStarted ? isoDate(patch.stageStarted) : null
     if (patch.daysLeft !== undefined) row.days_left = patch.daysLeft
+    if (patch.pins !== undefined) OPS.forEach((o) => {
+      row[`${o.key}_pinned_start`] = patch.pins[o.key] ? isoDate(patch.pins[o.key]) : null
+    })
     const { error: e } = await supabase.from('jobs').update(row).eq('id', id)
     pendingWrites.current = Math.max(0, pendingWrites.current - 1)
     if (e) { setError(e.message); load() }
@@ -274,10 +298,22 @@ export default function App() {
     // spent are unknown, not zero — logging zero would teach the report that
     // the station takes no time, which is worse than having no figure at all.
     if (from !== 'none' && job.stageStarted) {
-      const { error: le } = await supabase.from('stage_log').upsert({
+      const base = {
         job_id: job.id, stage: from,
         planned_days: job[from], actual_days: daysSpent(job, today, cal),
-      })
+      }
+      // The dates as well as the durations: the station opened the day the unit
+      // went into it and closes today, which is what makes planned start and
+      // finish readable against actual start and finish later on.
+      const dated = { ...base, started_on: isoDate(job.stageStarted), finished_on: isoDate(today) }
+      let { error: le } = await supabase.from('stage_log')
+        .upsert(stageDatesEnabled ? dated : base)
+      // A database still on the old stage_log rejects the two date columns.
+      // Record the durations rather than losing the closure over it.
+      if (le && stageDatesEnabled && /started_on|finished_on/.test(le.message || '')) {
+        setStageDatesEnabled(false)
+        ;({ error: le } = await supabase.from('stage_log').upsert(base))
+      }
       if (le) setError(le.message)
     }
     const to = nextStage(from)
@@ -322,6 +358,57 @@ export default function App() {
 
   const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
 
+  // Correct the dates a station actually ran between.
+  //
+  // Where they live depends on the station. The one in progress keeps its start
+  // on the unit itself — the same field as "Went into …" — and has no finish
+  // until it is closed, so closing it is what sets one. A station already closed
+  // keeps both dates on its stage log row, and the days it took are recomputed
+  // from them, so the figures in the report can never drift away from the dates
+  // shown beside them.
+  const saveStageDates = useCallback(async (job, stage, patch) => {
+    if ((job.stage || 'none') === stage) {
+      if (patch.start !== undefined) saveJob(job.id, { stageStarted: patch.start })
+      return
+    }
+    if (!stageDatesEnabled) return
+    const cur = (stageLog || []).find((l) => l.job_id === job.id && l.stage === stage)
+    const started = patch.start !== undefined ? patch.start
+      : cur && cur.started_on ? parseDate(cur.started_on) : null
+    // Falling back to closed_on the way the table does, so an edit acts on the
+    // dates being shown. A row from before these columns existed thereby gets
+    // its displayed finish written down properly the first time it is touched.
+    const curFinish = cur && (cur.finished_on || cur.closed_on)
+    const finished = patch.finish !== undefined ? patch.finish
+      : curFinish ? parseDate(curFinish) : null
+
+    // Both dates gone means nothing is known about the station any more, and a
+    // row saying only that it was booked for eight days is worse than no row.
+    if (!started && !finished) {
+      setStageLog((ls) => ls.filter((l) => !(l.job_id === job.id && l.stage === stage)))
+      const { error: e } = await supabase.from('stage_log').delete()
+        .eq('job_id', job.id).eq('stage', stage)
+      if (e) { setError(e.message); load() }
+      return
+    }
+
+    const row = {
+      job_id: job.id, stage,
+      planned_days: cur ? cur.planned_days : Math.max(1, job[stage] || 1),
+      // Half a pair of dates cannot say how long the station took, and unknown
+      // is not zero — the report leaves such a row out rather than counting it.
+      actual_days: started && finished ? workdaysInclusive(started, finished, cal) : null,
+      started_on: started ? isoDate(started) : null,
+      finished_on: finished ? isoDate(finished) : null,
+    }
+    setStageLog((ls) => [
+      ...ls.filter((l) => !(l.job_id === job.id && l.stage === stage)),
+      { closed_on: (cur && cur.closed_on) || isoDate(today), ...row },
+    ])
+    const { error: e } = await supabase.from('stage_log').upsert(row)
+    if (e) { setError(e.message); load() }
+  }, [stageLog, stageDatesEnabled, saveJob, cal, today, load])
+
   const { scheduled, scheduleError } = useMemo(() => {
     try {
       const list = leveled
@@ -335,6 +422,53 @@ export default function App() {
     }
   }, [jobs, caps, leveled, today, cal])
 
+  // Dragging a planned bar places that stage by hand: the middle of the bar
+  // moves it, either edge stretches it.
+  //
+  // Every drag pins, resizes included. The alternative — resize the days and let
+  // the scheduler re-place the bar — reads as a bug: the plan is built backward
+  // from the delivery date, so its end is the anchored edge, and dragging the
+  // right edge rightwards would grow the bar leftwards instead. Pinning means
+  // the stage ends up exactly where it was dropped, every time.
+  const dragStage = useCallback((jobId, key, mode, deltaDays) => {
+    if (!pinsEnabled) return
+    const job = jobs.find((j) => j.id === jobId)
+    const sched = scheduled.find((j) => j.id === jobId)
+    if (!job || !sched) return
+    const span = sched.spans[key]
+    // A stage cannot begin on a day the shop is shut, so a bar dropped on one
+    // takes the nearest working day *in the direction it was dragged*. Always
+    // rounding forward would cancel a small drag to the left outright: two days
+    // back off a Monday is a Saturday, which would round straight back to the
+    // Monday it came from.
+    const onWork = (d, dir) => (cal.isWorkday(d) ? strip(d)
+      : dir < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d))
+    let start = span.start
+    let dur = Math.max(1, job[key] || 1)
+    if (mode === 'move') {
+      start = onWork(addDays(span.start, deltaDays), deltaDays)
+    } else if (mode === 'end') {
+      const end = addDays(span.end, deltaDays)
+      dur = workdaysInclusive(span.start, end < span.start ? span.start : end, cal)
+    } else {
+      const moved = onWork(addDays(span.start, deltaDays), deltaDays)
+      start = moved > span.end ? strip(span.end) : moved
+      dur = workdaysInclusive(start, span.end, cal)
+    }
+    saveJob(jobId, {
+      pins: { ...job.pins, [key]: start },
+      ...(Math.max(1, dur) === job[key] ? {} : { [key]: Math.max(1, dur) }),
+    })
+  }, [jobs, scheduled, cal, pinsEnabled, saveJob])
+
+  // Hand a stage back to the scheduler.
+  const releasePin = useCallback((job, key) => {
+    const pins = { ...job.pins }
+    delete pins[key]
+    saveJob(job.id, { pins })
+  }, [saveJob])
+  const releaseAllPins = useCallback((job) => saveJob(job.id, { pins: {} }), [saveJob])
+
   // Where the work actually lands: remaining work pushed forward from today.
   // The plan above says when work *should* happen; this says when it will.
   const { projected, projectError } = useMemo(() => {
@@ -343,15 +477,60 @@ export default function App() {
   }, [jobs, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
+
+  // Closed stations by unit, then by station.
+  const logByJob = useMemo(() => {
+    const m = new Map()
+    ;(stageLog || []).forEach((l) => {
+      const e = m.get(l.job_id) || {}
+      e[l.stage] = {
+        plannedDays: l.planned_days,
+        actualDays: l.actual_days,
+        started: l.started_on ? parseDate(l.started_on) : null,
+        // Rows closed before the dates were kept only know the day they were
+        // written, which for those is the nearest thing to a finish date.
+        finished: l.finished_on ? parseDate(l.finished_on)
+          : l.closed_on ? parseDate(l.closed_on) : null,
+      }
+      m.set(l.job_id, e)
+    })
+    return m
+  }, [stageLog])
+
+  // The four dates per station, per unit: planned start and finish against
+  // actual start and finish.
+  //
+  // The planned side is the plain just-in-time plan — straight back from the
+  // delivery date, capacity ignored — and not the board's levelled plan, which
+  // cannot answer the question. Levelling books no work before today, so for a
+  // station that has already run it invents a date in the future and the
+  // comparison turns to nonsense. Just-in-time is defined in the past as well:
+  // the latest that station could have run and still made delivery. It also
+  // holds still when the capacity toggle is flipped.
+  const stagesById = useMemo(() => {
+    const m = new Map()
+    jobs.forEach((j) => {
+      let plan = null
+      // A calendar with nearly everything switched off leaves nowhere to put
+      // the work; the actual dates are still worth showing without the plan.
+      try { plan = scheduleJob(j, today, cal).spans } catch { plan = null }
+      m.set(j.id, stageDates(j, plan, logByJob.get(j.id), projById.get(j.id), cal))
+    })
+    return m
+  }, [jobs, logByJob, projById, today, cal])
   const slipping = projected.filter((p) => p.slipping).length
   const onFloor = jobs.filter(underway).length
 
   const { days, months } = useMemo(() => {
     let min = today, max = addDays(today, 14)
     scheduled.forEach((j) => {
-      if (j.spans.fab.start < min) min = j.spans.fab.start
+      // Any stage can be pinned anywhere, so every span counts towards the
+      // window — not just fabrication at the front and assembly at the back.
+      OPS.forEach((o) => {
+        if (j.spans[o.key].start < min) min = j.spans[o.key].start
+        if (j.spans[o.key].end > max) max = j.spans[o.key].end
+      })
       if (j.delivery > max) max = j.delivery
-      if (j.spans.asm.end > max) max = j.spans.asm.end
     })
     projected.forEach((p) => { if (p.projectedEnd && p.projectedEnd > max) max = p.projectedEnd })
     min = addDays(min, -3)
@@ -423,7 +602,89 @@ export default function App() {
     }).map((j) => j.id))
   }, [])
 
+  // The board sorts by the day fabrication has to start, which is exactly the
+  // thing a drag changes — so left live, the row being dragged would leap to a
+  // different place on the board the moment the pointer came up. Hold the order
+  // and settle it when the units themselves change, the way the table does.
+  const [boardOrder, setBoardOrder] = useState([])
+  const resettleBoard = useCallback(() => {
+    setBoardOrder(scheduledRef.current.slice()
+      .sort((a, b) => a.mustStart - b.mustStart
+        || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true }))
+      .map((j) => j.id))
+  }, [])
+  const boardRows = useMemo(() => {
+    const byId = new Map(scheduled.map((j) => [j.id, j]))
+    const ordered = boardOrder.map((id) => byId.get(id)).filter(Boolean)
+    const seen = new Set(ordered.map((j) => j.id))
+    return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
+  }, [scheduled, boardOrder])
+
+  // Grab the board itself and pull it around, the way you would a paper
+  // schedule on a bench. The bars keep their own gesture — dragging one places
+  // a stage — so panning only starts on the board's own background.
+  const boardRef = useRef(null)
+  const pan = useRef(null)
+  const [panning, setPanning] = useState(false)
+
+  const panDown = useCallback((e) => {
+    const el = boardRef.current
+    if (!el || e.button) return
+    // Touch already drags the board, with momentum and rubber-banding the
+    // browser does better than this would; panning it as well would scroll
+    // twice as far as the finger moved.
+    if (e.pointerType === 'touch') return
+    // Anything that already does something when you drag or click it keeps it.
+    if (e.target.closest('.bar, input, button, select, textarea, a, label')) return
+    pan.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop, moved: false }
+    setPanning(true)
+  }, [])
+
+  // The move and release are watched on the window rather than held with
+  // setPointerCapture. Capturing the pointer redirects the click that ends the
+  // gesture to the capturing element, so the board swallowed every click on a
+  // date and every click on a row label — the day toggles and unit selection
+  // both stopped working. Window listeners follow the pointer just as well and
+  // leave the click where it belongs.
+  useEffect(() => {
+    if (!panning) return
+    const move = (e) => {
+      const p = pan.current, el = boardRef.current
+      if (!p || !el) return
+      const dx = e.clientX - p.x, dy = e.clientY - p.y
+      // A few pixels of slop, so a click that wobbles is still a click.
+      if (!p.moved && Math.abs(dx) + Math.abs(dy) > 3) p.moved = true
+      el.scrollLeft = p.left - dx
+      el.scrollTop = p.top - dy
+    }
+    const up = () => {
+      const p = pan.current
+      pan.current = null
+      setPanning(false)
+      const el = boardRef.current
+      if (!p || !p.moved || !el) return
+      // Swallow the click this drag is about to fire. Panning across the date
+      // row would otherwise close every day it passed over.
+      const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault() }
+      el.addEventListener('click', swallow, { capture: true, once: true })
+      setTimeout(() => el.removeEventListener('click', swallow, { capture: true }), 0)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    // A pointer released outside the browser never reports back; don't leave
+    // the board stuck to the cursor.
+    window.addEventListener('blur', up)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('blur', up)
+    }
+  }, [panning])
+
   const idKey = scheduled.map((j) => j.id).sort().join(',')
+  useEffect(() => { resettleBoard() }, [idKey, resettleBoard])
   useEffect(() => { resortTable() }, [view, idKey, sort, resortTable])
 
   // Clicking the sorted column flips it. Variance and the day counts open
@@ -440,6 +701,17 @@ export default function App() {
     const seen = new Set(ordered.map((j) => j.id))
     return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
   }, [scheduled, tableOrder])
+
+  // Every unit's stations, flattened for the report, in delivery order.
+  const stageDateRows = useMemo(() => {
+    const out = []
+    ;[...jobs]
+      .sort((a, b) => a.delivery - b.delivery
+        || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true }))
+      .forEach((j) => (stagesById.get(j.id) || [])
+        .forEach((st) => out.push({ ...st, jobId: j.id, unit: j.unit })))
+    return out
+  }, [jobs, stagesById])
 
   const dayIndex = (d) => daysBetween(days[0], d)
 
@@ -462,6 +734,7 @@ export default function App() {
   const sel = scheduled.find((j) => j.id === selected)
   const selPart = sel ? partsById.get(sel.partId) : null
   const selProj = sel ? projById.get(sel.id) : null
+  const selStages = sel ? stagesById.get(sel.id) : null
   // A unit whose numbers have been tuned away from its part number's standard.
   const selDrift = selPart && (selPart.description !== sel.desc
     || OPS.some((o) => selPart[`${o.key}_days`] !== sel[o.key]))
@@ -492,10 +765,10 @@ export default function App() {
         <div className="title">Shop schedule <span>· scheduled backward from delivery</span></div>
         <div className="stats">
           <div className="views">
-            {['board', 'table', ...(trackingEnabled ? ['report'] : [])].map((v) => (
+            {['board', 'table', 'calendar', ...(trackingEnabled && SHOW_REPORT ? ['report'] : [])].map((v) => (
               <button key={v} className={view === v ? 'on' : ''}
                 onClick={() => { setView(v); setSelected(null) }}>
-                {v === 'board' ? 'Board' : v === 'table' ? 'Table' : 'Report'}
+                {v[0].toUpperCase() + v.slice(1)}
               </button>
             ))}
           </div>
@@ -529,13 +802,20 @@ export default function App() {
         <div><span className="chip todaychip" />Today</div>
         <div>▼ Delivery</div>
         {trackingEnabled && <div><span className="lanekey" />Plan over projection</div>}
+        {pinsEnabled && <div><span className="chip pinchipkey" />Placed by hand</div>}
         <div><span className="chip offchip" />Shop closed</div>
+        <button className="btn sm" onClick={resettleBoard}
+          title="Order the rows by the day fabrication has to start">Re-sort rows</button>
         {calendarEnabled
           ? <div className="hint">Click any date to close or open that day</div>
           : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
+        {pinsEnabled
+          ? <div className="hint">Drag the board to pan it; drag a planned bar to place a stage by hand, or an edge to change its days</div>
+          : <div className="hint bad">Dragging stages needs the <code>*_pinned_start</code> columns on <code>jobs</code> — see supabase/schema.sql</div>}
       </div>
 
-      <div className="boardwrap">
+      <div ref={boardRef} className={`boardwrap${panning ? ' panning' : ''}`}
+        onPointerDown={panDown}>
         <div className="grid" style={{ gridTemplateColumns: `230px repeat(${days.length}, ${COL}px)` }}>
           <div className="corner" />
           {months.map((m, i) => <div key={i} className="month" style={{ gridColumn: `span ${m.count}` }}>{m.label}</div>)}
@@ -554,9 +834,10 @@ export default function App() {
             )
           })}
 
-          {scheduled.map((j) => (
+          {boardRows.map((j) => (
             <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
               pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
+              onDragStage={pinsEnabled ? dragStage : undefined}
               selected={selected === j.id}
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
@@ -574,8 +855,13 @@ export default function App() {
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
           projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today}
           sort={sort} onSort={sortBy} />
+      ) : view === 'calendar' ? (
+        <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
+          today={today} tracking={trackingEnabled} selected={selected}
+          onSelect={(id) => setSelected((cur) => (cur === id ? null : id))} />
       ) : (
-        <StageReport log={stageLog} jobs={jobs} partsById={partsById} />
+        <StageReport log={stageLog} jobs={jobs} partsById={partsById}
+          stages={stageDateRows} datesEnabled={stageDatesEnabled} />
       )}
 
       {view !== 'report' && (sel ? (
@@ -624,8 +910,8 @@ export default function App() {
                   </div>
                   <div className="stageline">
                     {!sel.stageStarted
-                      ? <span>No start date, so the days spent are unknown. Closing this station
-                          won't be recorded in the report — set the date first if you know it.</span>
+                      ? <span>No start date, so the days spent aren't counted. Set it if you know
+                          when this unit went into {STAGE_LABEL[sel.stage].toLowerCase()}.</span>
                       : selProj && selProj.spent > sel[sel.stage]
                         ? <span className="bad">{selProj.spent} days spent against {sel[sel.stage]} planned — over by {selProj.spent - sel[sel.stage]}.</span>
                         : <span>{selProj ? selProj.spent : 0} of {sel[sel.stage]} planned days spent.</span>}
@@ -639,6 +925,41 @@ export default function App() {
                   </button>
                 </div>
               )}
+            </div>
+          )}
+          {trackingEnabled && selStages && (
+            <div className="panelsect">
+              <h4>Stage dates — planned against actual</h4>
+              <div className="tablescroll">
+                <StageDateTable rows={selStages} compact today={today}
+                  logEditable={stageDatesEnabled}
+                  onEdit={(r, which, d) => saveStageDates(sel, r.key, { [which]: d })} />
+              </div>
+              <p className="foot">Planned is the just-in-time plan — the latest each station could
+                run and still make {fmt(sel.delivery)} — so it moves when the delivery date, the day
+                counts or the shop calendar do. Actual dates are stamped as a station is closed and
+                can be corrected here afterwards; the days a closed station took are recounted from
+                them. The station on now takes its start from the same field as <em>Went into …</em>
+                above and gets its finish when you close it. Clearing both dates forgets that
+                station's dates altogether — unknown is not zero.
+                {!stageDatesEnabled && ' Correcting a closed station needs the started_on and finished_on columns on stage_log — see supabase/schema.sql.'}</p>
+            </div>
+          )}
+          {pinsEnabled && hasPins(sel) && (
+            <div className="pinline">
+              <span>Placed by hand — the scheduler works around these rather than choosing their dates:</span>
+              <span className="pins">
+                {OPS.filter((o) => sel.pins && sel.pins[o.key]).map((o) => (
+                  <span key={o.key} className="pintag" style={{ borderColor: o.color, color: o.color }}>
+                    {SHORT[o.key]} {fmt(sel.spans[o.key].start)}
+                    <button onClick={() => releasePin(sel, o.key)}
+                      title={`Hand ${o.label.toLowerCase()} back to the scheduler`}>×</button>
+                  </span>
+                ))}
+                <button className="btn sm" onClick={() => releaseAllPins(sel)}>Release all</button>
+              </span>
+              {sel.conflict && <span className="bad">A stage sits across one that has to come before
+                it. Move it, or release the pin.</span>}
             </div>
           )}
           {selDrift && (
@@ -829,7 +1150,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                     <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
                       title={live === 'done' ? 'Complete'
                         : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
-                          + (live !== 'none' && !j.stageStarted ? ' — no start date, so this closure is not recorded' : '')}>
+                          + (live !== 'none' && !j.stageStarted ? ' — no start date set, so the days spent are not counted' : '')}>
                       <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
                     </button>
                   </td>
@@ -956,11 +1277,203 @@ function ChangePassword({ email, onClose }) {
   )
 }
 
+// Deliveries laid out on a month grid. The board answers "when does the work
+// happen"; this answers "what is going out the door in October", which is the
+// question the front office asks and the board is a poor shape for.
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTH = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+
+function CalendarView({ rows, projById, partsById, cal, today, tracking, selected, onSelect }) {
+  const [month, setMonth] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1))
+  const step = (n) => setMonth((m) => new Date(m.getFullYear(), m.getMonth() + n, 1))
+
+  const byDay = useMemo(() => {
+    const m = new Map()
+    rows.forEach((j) => {
+      const k = isoDate(j.delivery)
+      if (!m.has(k)) m.set(k, [])
+      m.get(k).push(j)
+    })
+    m.forEach((list) => list.sort((a, b) =>
+      String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true })))
+    return m
+  }, [rows])
+
+  // Whole weeks, Sunday to Saturday, so the grid is always seven across.
+  const cells = useMemo(() => {
+    const first = strip(new Date(month.getFullYear(), month.getMonth(), 1))
+    const last = strip(new Date(month.getFullYear(), month.getMonth() + 1, 0))
+    const out = []
+    for (let d = addDays(first, -first.getDay()); d <= addDays(last, 6 - last.getDay()); d = addDays(d, 1)) out.push(d)
+    return out
+  }, [month])
+
+  const inMonth = rows.filter((j) => j.delivery.getFullYear() === month.getFullYear()
+    && j.delivery.getMonth() === month.getMonth())
+  const slipping = tracking
+    ? inMonth.filter((j) => { const p = projById.get(j.id); return p && p.slipping }).length
+    : inMonth.filter((j) => j.late).length
+  // Where the work actually is, so "nothing this month" doesn't look like a bug
+  // when every delivery is a month either side of the one being looked at.
+  const near = useMemo(() => {
+    const ms = rows.map((j) => j.delivery).sort((a, b) => a - b)
+    return { first: ms[0] || null, last: ms[ms.length - 1] || null }
+  }, [rows])
+  const todayT = today.getTime()
+
+  return (
+    <div className="calwrap">
+      <div className="calhead">
+        <div className="calnav">
+          <button className="btn sm" onClick={() => step(-1)} aria-label="Previous month">‹</button>
+          <h3>{MONTH(month)}</h3>
+          <button className="btn sm" onClick={() => step(1)} aria-label="Next month">›</button>
+          <button className="btn sm" onClick={() => setMonth(new Date(today.getFullYear(), today.getMonth(), 1))}>
+            Today
+          </button>
+        </div>
+        <div className="calstats">
+          <div><b>{inMonth.length}</b> {inMonth.length === 1 ? 'delivery' : 'deliveries'} this month</div>
+          {tracking && <div className={slipping ? 'bad' : ''}><b>{slipping}</b> not projected to make it</div>}
+          {inMonth.length === 0 && near.first && (
+            <div className="muted">
+              Deliveries run {fmt(near.first)} to {fmt(near.last)}
+              {near.last.getFullYear() !== today.getFullYear() ? ` ${near.last.getFullYear()}` : ''}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="calgrid">
+        {DOW.map((d) => <div key={d} className="caldow">{d}</div>)}
+        {cells.map((d) => {
+          const list = byDay.get(isoDate(d)) || []
+          const other = d.getMonth() !== month.getMonth()
+          const off = !cal.isWorkday(d)
+          return (
+            <div key={isoDate(d)}
+              className={`calcell${other ? ' other' : ''}${off ? ' off' : ''}${d.getTime() === todayT ? ' today' : ''}`}>
+              <div className="caldate">{d.getDate()}
+                {/* Only days set by hand get a word. Every Saturday being
+                    labelled "closed" is noise; a closed Thanksgiving, or a
+                    Saturday opened for overtime, is the thing worth reading. */}
+                {!other && cal.isOverridden(d) && (
+                  <span className={`calclosed${off ? '' : ' on'}`}
+                    title={off ? 'Shop closed this day' : 'Shop open this day'}>
+                    {off ? 'closed' : 'open'}
+                  </span>
+                )}
+              </div>
+              {list.map((j) => {
+                const p = projById.get(j.id)
+                const late = tracking ? p && p.slipping : j.late
+                const done = tracking && p && p.complete
+                const pn = (partsById.get(j.partId) || {}).part_number
+                return (
+                  <button key={j.id} type="button"
+                    className={`dlv${late ? ' slip' : ''}${done ? ' done' : ''}${selected === j.id ? ' sel' : ''}`}
+                    onClick={() => onSelect(j.id)}
+                    title={`${j.unit}${j.desc ? ` — ${j.desc}` : ''}\nDue ${fmt(j.delivery)}`
+                      + (tracking && p && p.projectedEnd ? `\nProjected ${fmt(p.projectedEnd)}` : '')
+                      + (late ? ` — ${p ? p.variance : j.lateDays} working days late` : '')}>
+                    <span className="u">{j.unit}</span>
+                    {late && <span className="v">+{p ? p.variance : j.lateDays}d</span>}
+                    {(pn || j.desc) && <span className="m">{pn || j.desc}</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
+      <p className="calfoot">Each unit sits on the date it is due out. Click one to open it below.
+        Days the shop is closed are shaded — a delivery landing on one is worth a second look.</p>
+    </div>
+  )
+}
+
+// The four dates for a station: what the plan says it should run, and what it
+// actually did. A station not yet closed has no actual finish — the projection
+// stands in for it, marked as a projection, because a guess printed as a fact
+// is how a board stops being believed.
+function StageDateTable({ rows, showUnit, showVar, showState, compact, onEdit, logEditable, today }) {
+  const date = (d) => (d ? fmt(d) : <span className="muted">—</span>)
+  // What can be corrected by hand, and what has to be corrected some other way.
+  // A station that hasn't run has no actual dates to give; the one in progress
+  // has a start but no finish, because a station finishes by being closed —
+  // typing a date into it would close it behind the user's back.
+  const canEdit = (r, which) => !onEdit ? false
+    : r.state === 'pending' ? false
+    : r.state === 'active' ? which === 'start'
+    : logEditable
+  const edit = (r, which, value, bounds) => (
+    <input type="date" className="dateedit" value={value ? isoDate(value) : ''}
+      {...bounds}
+      title={`When ${r.unit ? `${r.unit} ` : ''}${which === 'start' ? 'went into' : 'came out of'} ${STAGE_LABEL[r.key].toLowerCase()}`}
+      onChange={(e) => onEdit(r, which, e.target.value ? parseDate(e.target.value) : null)} />
+  )
+  const delta = (n) => {
+    if (n == null) return <span className="muted">—</span>
+    if (n === 0) return <span className="good">on plan</span>
+    return <span className={n > 0 ? 'bad' : 'good'}>{n > 0 ? `+${n}` : n} d</span>
+  }
+  const STATE = { closed: 'Closed', active: 'On now', pending: 'Not started' }
+  return (
+    <table className="report stagedates">
+      <thead>
+        <tr>
+          {showUnit && <th>Unit</th>}
+          <th>Station</th>
+          <th>Planned start</th><th>Planned finish</th>
+          <th>Actual start</th><th>Actual finish</th>
+          {showVar && <><th className="r">Start Δ</th><th className="r">Finish Δ</th></>}
+          {showState && <th>Status</th>}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.jobId ? `${r.jobId}-${r.key}` : r.key} className={r.state === 'active' ? 'onnow' : ''}>
+            {showUnit && <td className="strong">{r.unit}</td>}
+            <td><span className={`chip ${r.key}`}><i />{compact ? SHORT[r.key] : STAGE_LABEL[r.key]}</span></td>
+            <td className="n">{date(r.plan && r.plan.start)}</td>
+            <td className="n">{date(r.plan && r.plan.end)}</td>
+            <td className="n">
+              {canEdit(r, 'start')
+                // A station cannot have opened after it closed, nor in the future.
+                ? edit(r, 'start', r.actual.start, {
+                    max: isoDate(r.actual.finish && r.actual.finish < today ? r.actual.finish : today),
+                  })
+                : date(r.actual.start)}
+            </td>
+            <td className="n">
+              {canEdit(r, 'finish')
+                ? edit(r, 'finish', r.actual.finish, {
+                    min: r.actual.start ? isoDate(r.actual.start) : undefined,
+                    max: isoDate(today),
+                  })
+                : r.actual.finish ? fmt(r.actual.finish)
+                : r.projected ? <span className="muted">proj {fmt(r.projected.end)}</span>
+                : <span className="muted">—</span>}
+            </td>
+            {showVar && <>
+              <td className="r n">{delta(r.startVar)}</td>
+              <td className="r n">{delta(r.finishVar)}</td>
+            </>}
+            {showState && <td className="muted">{STATE[r.state]}</td>}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 // How each closed station actually went against what was booked for it.
-function StageReport({ log, jobs, partsById }) {
+function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
   const rows = useMemo(() => {
     const byJob = new Map(jobs.map((j) => [j.id, j]))
-    return (log || []).map((l) => {
+    // A station whose dates are only half filled in has no days figure yet.
+    // It still shows in the stage-date table above; it just can't be averaged.
+    return (log || []).filter((l) => l.actual_days != null).map((l) => {
       const j = byJob.get(l.job_id)
       const part = j ? partsById.get(j.partId) : null
       return {
@@ -973,9 +1486,11 @@ function StageReport({ log, jobs, partsById }) {
         planned: l.planned_days,
         actual: l.actual_days,
         diff: l.actual_days - l.planned_days,
+        started: l.started_on ? parseDate(l.started_on) : null,
+        finished: l.finished_on ? parseDate(l.finished_on) : null,
         closed: l.closed_on ? parseDate(l.closed_on) : null,
       }
-    }).sort((a, b) => (b.closed || 0) - (a.closed || 0))
+    }).sort((a, b) => ((b.finished || b.closed) || 0) - ((a.finished || a.closed) || 0))
   }, [log, jobs, partsById])
 
   const roll = (rs) => {
@@ -1003,6 +1518,29 @@ function StageReport({ log, jobs, partsById }) {
   const cls = (v) => (v > 5 ? 'bad' : v < -5 ? 'good' : '')
   const avg = (t, n) => (n ? (t / n).toFixed(t / n % 1 ? 1 : 0) : '—')
 
+  // Planned against actual dates. This stands whether or not anything has been
+  // closed out yet — before the first closure it is still the answer to when
+  // each station is meant to run.
+  const dateSection = (
+    <div className="repsect">
+      <h3>Stage dates — planned against actual</h3>
+      <div className="tablescroll">
+        <StageDateTable rows={stages || []} showUnit showVar showState />
+      </div>
+      <p className="foot">
+        Planned start and finish are the just-in-time plan — the latest each station could run and
+        still make the delivery date, capacity aside — so they move when a delivery date, a day
+        count or the shop calendar changes, but not when levelling is switched on or off. Actual
+        start is the day the unit went into the station and actual finish the day that station was
+        closed; both are stamped as it closes and can be corrected afterwards on the unit itself, in
+        the panel under the board or table. Δ is working days against plan, so a negative start
+        means the station opened earlier than it had to. A station still open shows where the
+        projection puts its finish.
+        {datesEnabled === false && ' Actual dates need the started_on and finished_on columns on stage_log — see supabase/schema.sql.'}
+      </p>
+    </div>
+  )
+
   if (rows.length === 0) return (
     <div className="reportwrap">
       <div className="empty">
@@ -1014,6 +1552,7 @@ function StageReport({ log, jobs, partsById }) {
           days they took are unknown, not zero. Units already on the floor before tracking began
           will usually go uncounted for their current station, and start counting at the next one.</p>
       </div>
+      {dateSection}
     </div>
   )
 
@@ -1086,12 +1625,15 @@ function StageReport({ log, jobs, partsById }) {
         <p className="foot">Grouped by part number where a unit has one, otherwise by its description.</p>
       </div>
 
+      {dateSection}
+
       <div className="repsect">
         <h3>Recent closures</h3>
         <div className="tablescroll">
           <table className="report">
             <thead><tr><th>Unit</th><th>Model</th><th>Station</th><th className="r">Booked</th>
-              <th className="r">Took</th><th className="r">Difference</th><th className="r">Closed</th></tr></thead>
+              <th className="r">Took</th><th className="r">Difference</th>
+              <th className="r">Started</th><th className="r">Finished</th></tr></thead>
             <tbody>
               {rows.slice(0, 25).map((r) => (
                 <tr key={r.key}>
@@ -1103,7 +1645,8 @@ function StageReport({ log, jobs, partsById }) {
                   <td className={`r n ${r.diff > 0 ? 'bad' : r.diff < 0 ? 'good' : ''}`}>
                     {r.diff > 0 ? `+${r.diff}` : r.diff || '0'} d
                   </td>
-                  <td className="r n muted">{r.closed ? fmt(r.closed) : '—'}</td>
+                  <td className="r n muted">{r.started ? fmt(r.started) : '—'}</td>
+                  <td className="r n muted">{r.finished ? fmt(r.finished) : r.closed ? fmt(r.closed) : '—'}</td>
                 </tr>
               ))}
             </tbody>
@@ -1111,7 +1654,8 @@ function StageReport({ log, jobs, partsById }) {
         </div>
         <p className="foot">
           {rows.length > 25 ? `Showing the 25 most recent of ${rows.length}. ` : ''}
-          Stations closed without a start date are not counted here — unknown is not the same as zero.
+          Stations closed without a start date are not counted here, nor are those whose start and
+          finish are only half filled in — unknown is not the same as zero.
         </p>
       </div>
     </div>
@@ -1120,13 +1664,38 @@ function StageReport({ log, jobs, partsById }) {
 
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
-function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect }) {
+function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage }) {
+  // The drag in progress, held on the row so a pointer move repaints one row
+  // rather than the whole board. It is a preview only — nothing is written
+  // until the pointer comes up, so a drag can be abandoned by putting the bar
+  // back where it came from.
+  const [drag, setDrag] = useState(null)
+  const snap = drag ? Math.round(drag.dx / COL) * COL : 0
+
+  const down = (e, key) => {
+    if (!onDragStage || e.button) return
+    const g = e.target.classList
+    const mode = g.contains('grip') ? (g.contains('l') ? 'start' : 'end') : 'move'
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setDrag({ key, mode, x0: e.clientX, dx: 0 })
+  }
+  const move = (e) => setDrag((d) => (d ? { ...d, dx: e.clientX - d.x0 } : d))
+  const up = () => setDrag((d) => {
+    if (d) {
+      const n = Math.round(d.dx / COL)
+      if (n !== 0) onDragStage(j.id, d.key, d.mode, n)
+    }
+    return null
+  })
+
   return (
     <>
       <div className={`rowlabel ${selected ? 'sel' : ''}`} onClick={onSelect}>
         <div className="unit">{j.unit}
           {tracking && proj && proj.slipping && <span className="flag">+{proj.variance}d</span>}
           {!tracking && j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}
+          {j.conflict && <span className="flag seq" title="A stage is pinned across one that has to come before it. Move it, or release the pin.">OVERLAP</span>}
         </div>
         <div className="desc" title={`${pn ? `${pn} · ` : ''}${j.desc ? `${j.desc} · ` : ''}deliver ${fmt(j.delivery)}`}>
           {pn && <span className="pntag">{pn}</span>}{j.desc ? `${j.desc} · ` : ''}deliver {fmt(j.delivery)}
@@ -1138,22 +1707,44 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             <div key={i} className={`cell ${!cal.isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
           ))}
         </div>
-        {/* upper lane: the plan the unit was sold on */}
+        {/* upper lane: the plan the unit was sold on — and the lane you drag */}
         {OPS.map((o) => {
           const s = j.spans[o.key]
-          const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          return <div key={o.key} className={`bar plan ${j.late && o.key === 'fab' ? 'latefab' : ''}`}
-            title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
-            style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color }} />
+          let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
+          const live = drag && drag.key === o.key
+          if (live) {
+            if (drag.mode === 'move') x += snap
+            else if (drag.mode === 'end') w = Math.max(COL, w + snap)
+            // the left edge stretches the bar while its far end stays put
+            else { const d = Math.min(snap, w - COL); x += d; w -= d }
+          }
+          const pinned = Boolean(j.pins && j.pins[o.key])
+          return <div key={o.key}
+            className={`bar plan${j.late && o.key === 'fab' ? ' latefab' : ''}`
+              + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
+            onPointerDown={onDragStage ? (e) => down(e, o.key) : undefined}
+            onPointerMove={onDragStage ? move : undefined}
+            onPointerUp={onDragStage ? up : undefined}
+            onPointerCancel={onDragStage ? up : undefined}
+            title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
+              + (pinned ? ' — placed by hand' : '')
+              + (onDragStage ? '. Drag to move it, drag an edge to change how long it takes.' : '')}
+            style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
+            {onDragStage && <><span className="grip l" /><span className="grip r" /></>}
+          </div>
         })}
-        {/* lower lane: where the remaining work actually lands */}
+        {/* lower lane: where the remaining work actually lands. Same colour as
+            the plan above it, filled solid rather than outlined, so the pair
+            reads as one station in two states. Colour says which station; how
+            late a unit is running is the flag on its label and how far its bars
+            run past the delivery mark. */}
         {tracking && proj && (underway(j) || proj.slipping) && OPS.map((o) => {
           const s = proj.spans[o.key]
           if (!s) return null
           const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          return <div key={`p-${o.key}`} className={`bar proj ${proj.slipping ? 'slip' : ''}`}
+          return <div key={`p-${o.key}`} className="bar proj"
             title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
-            style={{ left: x + 1, width: w - 3, background: proj.slipping ? '#B3382E' : o.color }} />
+            style={{ left: x + 1, width: w - 3, background: o.color }} />
         })}
         <div className="delmark" style={{ left: dayIndex(j.delivery) * COL + COL / 2 }} />
       </div>
@@ -1222,7 +1813,9 @@ function Style() {
     .legend { display: flex; gap: 16px; padding: 0 24px 12px; font-size: 12px; color: #3A434B; align-items: center; flex-wrap: wrap; }
     .chip { width: 14px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
     .todaychip { background: #fff; border: 1px solid #1B2126; width: 3px; height: 12px; }
-    .boardwrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; }
+    .boardwrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; cursor: grab; }
+    /* while panning the whole board answers to the pointer, inner cursors and all */
+    .boardwrap.panning, .boardwrap.panning * { cursor: grabbing !important; user-select: none; }
     .grid { display: grid; }
     .corner { position: sticky; left: 0; background: #FFF; z-index: 3; border-right: 1px solid #D4D9DC; }
     .month { font-size: 11px; font-weight: 600; color: #5B6670; padding: 6px 0 2px 4px; border-left: 1px solid #E4E8EA; overflow: hidden; white-space: nowrap; }
@@ -1253,6 +1846,26 @@ function Style() {
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
     .bar.proj { top: 24px; height: 13px; }
     .bar.latefab { outline: 2px solid #B3382E; }
+    /* the plan is the lane you drag: move from the middle, stretch from an edge */
+    .bar.plan.draggable { cursor: grab; touch-action: none; }
+    .bar.plan.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
+    .bar.plan.pinned { border-width: 2px; }
+    .bar.plan.pinned::after { content: ''; position: absolute; left: 3px; top: 50%; margin-top: -2px;
+      width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+    .grip { position: absolute; top: -2px; bottom: -2px; width: 7px; cursor: col-resize; }
+    .grip.l { left: -3px; } .grip.r { right: -3px; }
+    .bar.plan.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
+    .flag.seq { background: #96581F; }
+    .pinchipkey { background: #FFF; border: 2px solid #5B6670; box-sizing: border-box; }
+    .pinline { margin: 14px 0 4px; padding: 10px 12px; background: #F9FAFB; border: 1px solid #E4E8EA;
+      border-radius: 5px; font-size: 12px; color: #5B6670; display: flex; flex-direction: column; gap: 8px; }
+    .pinline .bad { color: #B3382E; font-weight: 600; }
+    .pinline .pins { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .pintag { display: inline-flex; align-items: center; gap: 4px; border: 1px solid; border-radius: 3px;
+      padding: 2px 4px 2px 7px; font-weight: 600; font-variant-numeric: tabular-nums; background: #FFF; }
+    .pintag button { border: 0; background: none; cursor: pointer; color: inherit; font-size: 14px;
+      line-height: 1; padding: 0 3px; border-radius: 2px; }
+    .pintag button:hover { background: rgba(0,0,0,.1); }
     .lanekey { width: 14px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -2px;
       background: linear-gradient(#E3EAF2 0 50%, #44688F 50% 100%); border: 1px solid #44688F; }
     /* stage chips */
@@ -1284,6 +1897,45 @@ function Style() {
     .since input { padding-block: 4px; }
     .sincedays { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; padding-left: 8px; }
     .sincedays.bad { color: #B3382E; font-weight: 600; }
+    /* delivery calendar */
+    .calwrap { margin: 0 24px 24px; }
+    .calhead { display: flex; flex-wrap: wrap; gap: 10px 26px; align-items: center; justify-content: space-between;
+      background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px 6px 0 0; border-bottom: 0; padding: 10px 14px; }
+    .calnav { display: flex; align-items: center; gap: 8px; }
+    .calnav h3 { margin: 0; font-size: 15px; font-weight: 700; min-width: 168px; }
+    .calstats { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: baseline; font-size: 13px; color: #3A434B; }
+    .calstats b { font-size: 15px; font-variant-numeric: tabular-nums; }
+    .calstats .bad b { color: #B3382E; }
+    .calgrid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+      border: 1px solid #D4D9DC; border-radius: 0 0 6px 6px; overflow: hidden; background: #D4D9DC; gap: 1px; }
+    .caldow { background: #F6F8F9; font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: #7A848C; padding: 7px 9px; }
+    .calcell { background: #FFF; min-height: 104px; padding: 5px 5px 7px; display: flex; flex-direction: column; gap: 3px; }
+    .calcell.other { background: #FAFBFB; }
+    .calcell.other .caldate { color: #B8C0C6; }
+    .calcell.off { background: #F3F5F6; }
+    .calcell.off.other { background: #F7F8F9; }
+    .calcell.today { box-shadow: inset 0 0 0 2px #1B2126; }
+    .caldate { font-size: 11px; font-weight: 700; color: #5B6670; display: flex; align-items: baseline;
+      justify-content: space-between; gap: 6px; padding: 1px 2px 2px; }
+    .calcell.today .caldate { color: #1B2126; }
+    .calclosed { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #9AA4AB; }
+    .calclosed.on { color: #3E7C59; }
+    .dlv { display: block; width: 100%; text-align: left; font-family: inherit; cursor: pointer;
+      border: 1px solid #C6CDD1; border-left: 3px solid #5B6670; background: #FFF; border-radius: 3px;
+      padding: 3px 6px; line-height: 1.3; }
+    .dlv:hover { background: #F6F8F9; }
+    .dlv.sel { background: #EDF2F6; border-color: #44688F; border-left-color: #44688F; }
+    .dlv.slip { border-left-color: #B3382E; }
+    .dlv.done { border-left-color: #3E7C59; }
+    .dlv .u { font-size: 12px; font-weight: 700; color: #1B2126; }
+    .dlv .v { font-size: 10px; font-weight: 700; color: #B3382E; margin-left: 5px; }
+    .dlv .m { display: block; font-size: 10px; color: #7A848C; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .calfoot { margin: 8px 0 0; font-size: 11px; color: #7A848C; line-height: 1.5; max-width: 76ch; }
+    @media (max-width: 860px) {
+      .calcell { min-height: 78px; }
+      .dlv .m { display: none; }
+    }
     /* stage report */
     .reportwrap { margin: 0 24px 24px; display: flex; flex-direction: column; gap: 18px; }
     .rephead { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 14px 18px; font-size: 13px; color: #3A434B; }
@@ -1304,6 +1956,22 @@ function Style() {
     table.report .good { color: #2D6044; font-weight: 600; }
     .chip2 { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
     .chip2 i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    /* wide tables scroll sideways rather than pushing the page out */
+    .tablescroll { overflow-x: auto; border: 1px solid #D4D9DC; border-radius: 6px; }
+    /* planned against actual dates */
+    table.stagedates td { padding: 7px 12px; }
+    table.stagedates tr.onnow td { background: #FBF7EF; }
+    table.stagedates .muted { font-weight: 400; }
+    .dateedit { font-family: inherit; font-size: inherit; color: inherit; width: 100%; min-width: 118px;
+      border: 1px solid transparent; border-radius: 3px; background: none; padding: 2px 4px; margin: -2px -4px; }
+    .dateedit:hover { border-color: #C6CDD1; background: #FFF; }
+    .dateedit:focus { outline: 2px solid #44688F; outline-offset: -1px; border-color: transparent; background: #FFF; }
+    .panelsect { margin: 14px 0 4px; display: flex; flex-direction: column; gap: 7px; }
+    .panelsect h4 { margin: 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #5B6670; }
+    .panelsect .foot { margin: 0; font-size: 11px; color: #7A848C; line-height: 1.5; }
+    .panelsect table.report { font-size: 12px; }
+    .panelsect table.report th { padding: 6px 7px; font-size: 9px; letter-spacing: .04em; }
+    .panelsect table.report td { padding: 6px 7px; }
     /* booked vs took: the rule is the estimate, the fill is reality */
     .meter { display: flex; align-items: center; gap: 10px; min-width: 210px; }
     .mtrack { position: relative; flex: 1; height: 9px; background: #EEF0F1; border-radius: 5px; overflow: hidden; min-width: 120px; }
@@ -1325,7 +1993,8 @@ function Style() {
     .lcell { border-top: 1px solid #E4E8EA; border-left: 1px solid #F0F2F3; height: 30px; font-size: 11px; display: flex; align-items: center; justify-content: center; position: relative; font-weight: 600; }
     .lcell.we { background: #F5F6F7; }
     .lcell.over { background: #F3D2CE !important; color: #7C221B !important; font-weight: 700; }
-    .panel { margin: 0 24px 28px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 16px 18px; max-width: 560px; }
+    /* wide enough for the four stage dates to sit side by side without scrolling */
+    .panel { margin: 0 24px 28px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; padding: 16px 18px; max-width: 600px; }
     .panel.wide { max-width: 780px; }
     .panel h3 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
     .panel .sub { margin: -6px 0 14px; font-size: 12px; color: #5B6670; line-height: 1.5; }
