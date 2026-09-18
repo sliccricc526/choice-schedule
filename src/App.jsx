@@ -607,12 +607,31 @@ export default function App() {
   // different place on the board the moment the pointer came up. Hold the order
   // and settle it when the units themselves change, the way the table does.
   const [boardOrder, setBoardOrder] = useState([])
+  // What the rows are ordered by. The day fabrication has to start is the
+  // shop's question — what to put on next. The two delivery dates are the
+  // office's: what is promised when, and when it will really land.
+  const [boardSort, setBoardSort] = useState('start')
   const resettleBoard = useCallback(() => {
+    const key = (j) => {
+      if (boardSort === 'delivery') return +j.delivery
+      if (boardSort === 'projected') {
+        const p = projRef.current.get(j.id)
+        // A unit with every station closed has no projected finish left to
+        // sort on; it goes to the bottom rather than to the top as a zero.
+        return p && p.projectedEnd ? +p.projectedEnd : null
+      }
+      return +j.mustStart
+    }
     setBoardOrder(scheduledRef.current.slice()
-      .sort((a, b) => a.mustStart - b.mustStart
-        || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true }))
+      .sort((a, b) => {
+        const va = key(a), vb = key(b)
+        if (va == null && vb == null) return 0
+        if (va == null) return 1
+        if (vb == null) return -1
+        return (va - vb) || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true })
+      })
       .map((j) => j.id))
-  }, [])
+  }, [boardSort])
   const boardRows = useMemo(() => {
     const byId = new Map(scheduled.map((j) => [j.id, j]))
     const ordered = boardOrder.map((id) => byId.get(id)).filter(Boolean)
@@ -731,6 +750,28 @@ export default function App() {
     return out
   }, [scheduled, days, cal])
 
+  // Where the work actually is, station by station, day by day. The load rows
+  // above count the plan, which under levelling can never exceed a cap and so
+  // never reports the shop being over. This counts the projection, so six
+  // trailers in a four-bay fabrication shop shows up as six.
+  const floorLoads = useMemo(() => {
+    const out = {}
+    OPS.forEach((o) => { out[o.key] = days.map(() => 0) })
+    projected.forEach((p) => OPS.forEach((o) => {
+      const s = p.spans[o.key]
+      if (!s) return                       // a station already closed has no span
+      for (let d = strip(s.start); d <= s.end; d = addDays(d, 1)) {
+        if (!cal.isWorkday(d)) continue
+        const i = daysBetween(days[0], d)
+        if (i >= 0 && i < out[o.key].length) out[o.key][i]++
+      }
+    }))
+    return out
+  }, [projected, days, cal])
+
+  const floorOver = OPS.reduce(
+    (n, o) => n + floorLoads[o.key].filter((c, i) => cal.isWorkday(days[i]) && c > caps[o.key]).length, 0)
+
   const overDays = OPS.reduce(
     (n, o) => n + loads[o.key].filter((c, i) => cal.isWorkday(days[i]) && c > caps[o.key]).length, 0)
   const daysOff = days.filter((d) => cal.isOverridden(d) && !cal.isWorkday(d)).length
@@ -813,8 +854,15 @@ export default function App() {
         {trackingEnabled && <div><span className="lanekey" />Plan over projection</div>}
         {pinsEnabled && <div><span className="chip pinchipkey" />Placed by hand</div>}
         <div><span className="chip offchip" />Shop closed</div>
+        <label className="sortpick">Sort rows by
+          <select value={boardSort} onChange={(e) => setBoardSort(e.target.value)}>
+            <option value="start">Fabrication start</option>
+            <option value="delivery">Planned delivery date</option>
+            <option value="projected">Projected delivery date</option>
+          </select>
+        </label>
         <button className="btn sm" onClick={resettleBoard}
-          title="Order the rows by the day fabrication has to start">Re-sort rows</button>
+          title="Apply the current sort again">Re-sort rows</button>
         {calendarEnabled
           ? <div className="hint">Click any date to close or open that day</div>
           : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
@@ -851,12 +899,25 @@ export default function App() {
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
 
-          <div className="secthead">Station load — units per day</div>
+          <div className="secthead">Planned load — units per day</div>
           <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
           {OPS.map((o) => (
             <LoadRow key={o.key} op={o} counts={loads[o.key]} cap={caps[o.key]} days={days} todayT={todayT} cal={cal}
               onCap={(v) => saveCap(o.key, v)} />
           ))}
+
+          {trackingEnabled && (<>
+            <div className="secthead">On the floor — units per day
+              {floorOver ? <span className="overtag"
+                title="Station-days where more units are on a station than its cap allows">
+                {floorOver} station-days over capacity</span> : null}
+            </div>
+            <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
+            {OPS.map((o) => (
+              <LoadRow key={`f-${o.key}`} op={o} counts={floorLoads[o.key]} cap={caps[o.key]}
+                days={days} todayT={todayT} cal={cal} />
+            ))}
+          </>)}
         </div>
       </div>
       </>) : view === 'table' ? (
@@ -1778,8 +1839,12 @@ function LoadRow({ op, counts, cap, days, todayT, cal, onCap }) {
     <>
       <div className="loadlabel">
         <span className="nm"><span className="chip" style={{ background: op.color }} />{op.label}</span>
-        <span className="cap">cap <input type="number" min="1" value={cap}
-          onChange={(e) => onCap(Math.max(1, parseInt(e.target.value) || 1))} /></span>
+        {/* The cap belongs to the station, not to a row, so only the planned
+            rows above offer it; the floor rows read it back. */}
+        <span className="cap">cap {onCap
+          ? <input type="number" min="1" value={cap}
+              onChange={(e) => onCap(Math.max(1, parseInt(e.target.value) || 1))} />
+          : <b>{cap}</b>}</span>
       </div>
       <div className="cellrow" style={{ gridColumn: `span ${days.length}`, gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
         {days.map((d, i) => {
@@ -1887,6 +1952,8 @@ function Style() {
     .pintag button { border: 0; background: none; cursor: pointer; color: inherit; font-size: 14px;
       line-height: 1; padding: 0 3px; border-radius: 2px; }
     .pintag button:hover { background: rgba(0,0,0,.1); }
+    .sortpick { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .sortpick select { font-family: inherit; font-size: 12px; padding: 3px 5px; border: 1px solid #C6CDD1; border-radius: 4px; background: #FFF; }
     .lanekey { width: 14px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -2px;
       background: linear-gradient(#E3EAF2 0 50%, #44688F 50% 100%); border: 1px solid #44688F; }
     /* stage chips */
@@ -2006,6 +2073,8 @@ function Style() {
     .delmark { position: absolute; top: 8px; width: 2px; height: 28px; background: #1B2126; }
     .delmark::after { content: ''; position: absolute; top: -4px; left: -3px; border: 4px solid transparent; border-top: 6px solid #1B2126; }
     .secthead { position: sticky; left: 0; z-index: 2; background: #F6F8F9; border-top: 2px solid #C6CDD1; border-right: 1px solid #D4D9DC; font-size: 11px; font-weight: 700; color: #3A434B; padding: 8px 10px 6px; white-space: nowrap; }
+    .overtag { margin-left: 7px; font-size: 10px; font-weight: 700; color: #fff; background: #B3382E; border-radius: 3px; padding: 1px 5px; }
+    .loadlabel .cap b { font-variant-numeric: tabular-nums; color: #3A434B; }
     .sectfill { background: #F6F8F9; border-top: 2px solid #C6CDD1; }
     .loadlabel { position: sticky; left: 0; z-index: 2; background: #FFF; border-top: 1px solid #E4E8EA; border-right: 1px solid #D4D9DC; padding: 5px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
     .loadlabel .nm { font-weight: 600; }
