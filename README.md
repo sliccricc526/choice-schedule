@@ -106,6 +106,20 @@ The header counts the month's deliveries and how many of them the projection say
 deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
 read as a broken one.
 
+### Moving around the board
+
+Once a real book is loaded the board runs well past the edge of the screen. Grab any empty part of
+it — a cell, the date row, the station load rows — and pull, the way you would a paper schedule
+across a bench.
+
+Anything that already answers to a drag or a click keeps doing so: the bars place stages, the dates
+open and close the shop, a row label selects its unit. A pan only counts as a pan once the pointer
+has actually moved a few pixels, so a click that wobbles is still a click, and the click that ends a
+real pan is swallowed — dragging across the date row must not close every day it passed over.
+
+On a touch screen the browser's own scrolling is left alone. It does momentum and rubber-banding
+better than this would, and panning as well would move the board twice as far as the finger.
+
 ### Placing a stage by hand
 
 The scheduler picks every date. When it picks wrong — and it will, because it doesn't know the

@@ -620,6 +620,69 @@ export default function App() {
     return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
   }, [scheduled, boardOrder])
 
+  // Grab the board itself and pull it around, the way you would a paper
+  // schedule on a bench. The bars keep their own gesture — dragging one places
+  // a stage — so panning only starts on the board's own background.
+  const boardRef = useRef(null)
+  const pan = useRef(null)
+  const [panning, setPanning] = useState(false)
+
+  const panDown = useCallback((e) => {
+    const el = boardRef.current
+    if (!el || e.button) return
+    // Touch already drags the board, with momentum and rubber-banding the
+    // browser does better than this would; panning it as well would scroll
+    // twice as far as the finger moved.
+    if (e.pointerType === 'touch') return
+    // Anything that already does something when you drag or click it keeps it.
+    if (e.target.closest('.bar, input, button, select, textarea, a, label')) return
+    pan.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop, moved: false }
+    setPanning(true)
+  }, [])
+
+  // The move and release are watched on the window rather than held with
+  // setPointerCapture. Capturing the pointer redirects the click that ends the
+  // gesture to the capturing element, so the board swallowed every click on a
+  // date and every click on a row label — the day toggles and unit selection
+  // both stopped working. Window listeners follow the pointer just as well and
+  // leave the click where it belongs.
+  useEffect(() => {
+    if (!panning) return
+    const move = (e) => {
+      const p = pan.current, el = boardRef.current
+      if (!p || !el) return
+      const dx = e.clientX - p.x, dy = e.clientY - p.y
+      // A few pixels of slop, so a click that wobbles is still a click.
+      if (!p.moved && Math.abs(dx) + Math.abs(dy) > 3) p.moved = true
+      el.scrollLeft = p.left - dx
+      el.scrollTop = p.top - dy
+    }
+    const up = () => {
+      const p = pan.current
+      pan.current = null
+      setPanning(false)
+      const el = boardRef.current
+      if (!p || !p.moved || !el) return
+      // Swallow the click this drag is about to fire. Panning across the date
+      // row would otherwise close every day it passed over.
+      const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault() }
+      el.addEventListener('click', swallow, { capture: true, once: true })
+      setTimeout(() => el.removeEventListener('click', swallow, { capture: true }), 0)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    // A pointer released outside the browser never reports back; don't leave
+    // the board stuck to the cursor.
+    window.addEventListener('blur', up)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('blur', up)
+    }
+  }, [panning])
+
   const idKey = scheduled.map((j) => j.id).sort().join(',')
   useEffect(() => { resettleBoard() }, [idKey, resettleBoard])
   useEffect(() => { resortTable() }, [view, idKey, sort, resortTable])
@@ -747,11 +810,12 @@ export default function App() {
           ? <div className="hint">Click any date to close or open that day</div>
           : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
         {pinsEnabled
-          ? <div className="hint">Drag a planned bar to place a stage by hand, or an edge to change its days</div>
+          ? <div className="hint">Drag the board to pan it; drag a planned bar to place a stage by hand, or an edge to change its days</div>
           : <div className="hint bad">Dragging stages needs the <code>*_pinned_start</code> columns on <code>jobs</code> — see supabase/schema.sql</div>}
       </div>
 
-      <div className="boardwrap">
+      <div ref={boardRef} className={`boardwrap${panning ? ' panning' : ''}`}
+        onPointerDown={panDown}>
         <div className="grid" style={{ gridTemplateColumns: `230px repeat(${days.length}, ${COL}px)` }}>
           <div className="corner" />
           {months.map((m, i) => <div key={i} className="month" style={{ gridColumn: `span ${m.count}` }}>{m.label}</div>)}
@@ -1749,7 +1813,9 @@ function Style() {
     .legend { display: flex; gap: 16px; padding: 0 24px 12px; font-size: 12px; color: #3A434B; align-items: center; flex-wrap: wrap; }
     .chip { width: 14px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
     .todaychip { background: #fff; border: 1px solid #1B2126; width: 3px; height: 12px; }
-    .boardwrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; }
+    .boardwrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; cursor: grab; }
+    /* while panning the whole board answers to the pointer, inner cursors and all */
+    .boardwrap.panning, .boardwrap.panning * { cursor: grabbing !important; user-select: none; }
     .grid { display: grid; }
     .corner { position: sticky; left: 0; background: #FFF; z-index: 3; border-right: 1px solid #D4D9DC; }
     .month { font-size: 11px; font-weight: 600; color: #5B6670; padding: 6px 0 2px 4px; border-left: 1px solid #E4E8EA; overflow: hidden; white-space: nowrap; }
