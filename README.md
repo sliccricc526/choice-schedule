@@ -194,6 +194,15 @@ the live rows is what makes a board stop being read. Complete is the stage the s
 something inferred from the dates: a unit is done when someone says it is done. The group starts
 folded, and whether it is open is remembered in the browser like the sort and the column width.
 
+**Table columns move.** Drag a heading and drop it on another to put the column there — after it if
+the drag came from the left, before it if from the right. A click still sorts; the browser tells a
+click and a drag apart, which is why the headings use HTML drag and drop rather than the pointer
+handling the bars use. The order is remembered per browser, and **Reset columns** appears once it
+has been changed. The heading and the cells under it are one entry in a single list of columns, so
+they cannot drift apart. An order saved before a column was switched off, or before a new one
+existed, still loads: what it names keeps its place, and anything it is missing goes back where it
+would have been by default.
+
 ### Moving around the board
 
 The column of unit names is resizable: drag the seam between it and the calendar. Descriptions are
