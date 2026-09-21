@@ -28,7 +28,12 @@ export default function App() {
   const [partsEnabled, setPartsEnabled] = useState(true)
   const [showParts, setShowParts] = useState(false)
   const [addPart, setAddPart] = useState('')
-  const [leveled, setLeveled] = useState(true)
+  // Off by default. The levelled plan books no work earlier than today, which
+  // is the right answer for a plan but wrong for reading a shop that is already
+  // running late — it pretends every overdue unit starts this morning. Plain
+  // just-in-time shows what each unit actually needed, and the shop turns
+  // levelling on when it wants to ask whether the plan fits capacity.
+  const [leveled, setLeveled] = useState(false)
   const [selected, setSelected] = useState(null)
   const [status, setStatus] = useState(configured ? 'loading' : 'unconfigured')
   const [error, setError] = useState('')
