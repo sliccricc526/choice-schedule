@@ -75,6 +75,30 @@ export function createCalendar(overrides) {
 // Weekends off, no closures — used when no calendar is supplied.
 export const defaultCalendar = createCalendar()
 
+// --- Steps within a station ------------------------------------------------
+// The pieces a station's work breaks into for one unit. A station with steps
+// takes exactly as long as its steps add up to, which is what lets the steps be
+// laid out inside its block with no rounding and no gap left over.
+
+export const stepDays = (steps) =>
+  (steps || []).reduce((n, s) => n + Math.max(1, s.days || 1), 0)
+
+// Each step's own span, tiled end to end across working days from the station's
+// start. Because the station's length is the sum of these, the last step ends
+// exactly where the station does.
+export function stepSpans(start, steps, cal = defaultCalendar) {
+  const out = []
+  let d = cal.isWorkday(start) ? strip(start) : cal.nextWorkday(start)
+  ;(steps || []).forEach((step) => {
+    const days = Math.max(1, step.days || 1)
+    let end = d
+    for (let i = 1; i < days; i++) end = cal.nextWorkday(end)
+    out.push({ ...step, start: d, end })
+    d = cal.nextWorkday(end)
+  })
+  return out
+}
+
 // --- Pinned stages ---------------------------------------------------------
 // A stage the shop has placed by hand, by dragging it on the board. The
 // scheduler stops choosing dates for that stage and works the rest of the unit

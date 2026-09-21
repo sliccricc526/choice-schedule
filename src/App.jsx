@@ -3,7 +3,7 @@ import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
-  workdaysInclusive, hasPins,
+  workdaysInclusive, hasPins, stepDays, stepSpans,
 } from './engine.js'
 
 const COL = 26
@@ -47,6 +47,13 @@ export default function App() {
   // Same for the pinned-stage columns: without them the board still schedules,
   // it just can't be overruled by dragging.
   const [pinsEnabled, setPinsEnabled] = useState(true)
+  // The steps each station breaks into, per unit. Empty is the normal state:
+  // a station with no steps keeps using its own typed day count.
+  const [steps, setSteps] = useState([])
+  // False until the job_steps table exists, so the board still runs without it.
+  const [stepsEnabled, setStepsEnabled] = useState(true)
+  // Which units are showing their steps on the board.
+  const [openUnits, setOpenUnits] = useState(() => new Set())
   // Closed stations, planned against actual. Empty until a station is closed.
   const [stageLog, setStageLog] = useState([])
   // False until stage_log carries started_on/finished_on, so closing a station
@@ -56,12 +63,13 @@ export default function App() {
   const load = useCallback(async () => {
     if (!supabase) return
     try {
-      const [jr, cr, dr, pr, sr] = await Promise.all([
+      const [jr, cr, dr, pr, sr, tr] = await Promise.all([
         supabase.from('jobs').select('*').order('delivery_date'),
         supabase.from('station_caps').select('*'),
         supabase.from('day_overrides').select('*'),
         supabase.from('part_numbers').select('*').order('part_number'),
         supabase.from('stage_log').select('*'),
+        supabase.from('job_steps').select('*').order('position'),
       ])
       if (jr.error || cr.error) {
         setStatus('error')
@@ -97,6 +105,9 @@ export default function App() {
       // The catalog is optional the same way, so the board still runs without it.
       setPartsEnabled(!pr.error)
       setParts(pr.error ? [] : (pr.data || []))
+      // Steps are optional the same way the catalog is.
+      setStepsEnabled(!tr.error)
+      setSteps(tr.error ? [] : (tr.data || []))
       const srows = sr.error ? [] : (sr.data || [])
       setStageLog(srows)
       if (srows.length) setStageDatesEnabled(Object.prototype.hasOwnProperty.call(srows[0], 'started_on'))
@@ -172,6 +183,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'day_overrides' }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'part_numbers' }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'stage_log' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_steps' }, scheduleReload)
       .subscribe()
     return () => { supabase.removeChannel(ch); clearTimeout(reloadTimer.current) }
   }, [load, scheduleReload, userId])
@@ -264,15 +276,60 @@ export default function App() {
     partTimers.current.set(id, setTimeout(() => flushPart(id), SAVE_AFTER))
   }, [flushPart])
 
+  // --- steps ---------------------------------------------------------------
+  // Same shape as the part-number edits: apply locally at once, persist after a
+  // pause, coalesced per row, so typing a step name is one write and not twelve.
+  const queuedSteps = useRef(new Map())
+  const stepTimers = useRef(new Map())
+  const flushStep = useCallback(async (id) => {
+    const patch = queuedSteps.current.get(id)
+    queuedSteps.current.delete(id)
+    stepTimers.current.delete(id)
+    if (!patch) { pendingWrites.current = Math.max(0, pendingWrites.current - 1); return }
+    const { error: e } = await supabase.from('job_steps').update(patch).eq('id', id)
+    pendingWrites.current = Math.max(0, pendingWrites.current - 1)
+    if (e) { setError(e.message); load() }
+  }, [load])
+  const saveStep = useCallback((id, patch) => {
+    setSteps((ls) => ls.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+    if (!queuedSteps.current.has(id)) pendingWrites.current += 1
+    queuedSteps.current.set(id, { ...(queuedSteps.current.get(id) || {}), ...patch })
+    clearTimeout(stepTimers.current.get(id))
+    stepTimers.current.set(id, setTimeout(() => flushStep(id), SAVE_AFTER))
+  }, [flushStep])
+
+  const addStep = useCallback(async (job, stage) => {
+    const cur = (steps || []).filter((r) => r.job_id === job.id && r.stage === stage)
+    // A station being broken down for the first time keeps the length it
+    // already had: the first step inherits the whole typed day count, so
+    // nothing on the board jumps the moment a step is added.
+    const first = cur.length === 0
+    const row = {
+      job_id: job.id, stage, name: '', done: false,
+      days: first ? Math.max(1, job[stage] || 1) : 1,
+      position: cur.reduce((n, r) => Math.max(n, r.position + 1), 0),
+    }
+    const { data, error: e } = await supabase.from('job_steps').insert(row).select().single()
+    if (e) { setError(e.message); return }
+    setSteps((ls) => [...ls, data])
+  }, [steps])
+
+  const removeStep = useCallback(async (id) => {
+    setSteps((ls) => ls.filter((r) => r.id !== id))
+    const { error: e } = await supabase.from('job_steps').delete().eq('id', id)
+    if (e) { setError(e.message); load() }
+  }, [load])
+
   // Flush anything still queued if the tab goes away mid-edit.
   useEffect(() => {
     const flushAll = () => {
       jobTimers.current.forEach((t, id) => { clearTimeout(t); flushJob(id) })
       partTimers.current.forEach((t, id) => { clearTimeout(t); flushPart(id) })
+      stepTimers.current.forEach((t, id) => { clearTimeout(t); flushStep(id) })
     }
     window.addEventListener('pagehide', flushAll)
     return () => { window.removeEventListener('pagehide', flushAll); flushAll() }
-  }, [flushJob, flushPart])
+  }, [flushJob, flushPart, flushStep])
   const newPart = async () => {
     const taken = new Set(parts.map((p) => p.part_number))
     let name = 'NEW-PN'
@@ -414,18 +471,45 @@ export default function App() {
     if (e) { setError(e.message); load() }
   }, [stageLog, stageDatesEnabled, saveJob, cal, today, load])
 
+  // Steps by unit, then by station, in the order the shop put them.
+  const stepsByJob = useMemo(() => {
+    const m = new Map()
+    ;(steps || []).forEach((r) => {
+      const e = m.get(r.job_id) || { fab: [], paint: [], asm: [] }
+      if (e[r.stage]) e[r.stage].push({ id: r.id, name: r.name || '', days: r.days, done: r.done, position: r.position })
+      m.set(r.job_id, e)
+    })
+    m.forEach((e) => OPS.forEach((o) => e[o.key].sort((a, b) => a.position - b.position)))
+    return m
+  }, [steps])
+
+  // A station with steps takes as long as its steps add up to. The typed day
+  // count on the unit stays untouched underneath and comes back the moment the
+  // last step is deleted, so breaking a station down is never destructive.
+  const units = useMemo(() => jobs.map((j) => {
+    const st = stepsByJob.get(j.id)
+    if (!st) return j
+    let out = j
+    OPS.forEach((o) => {
+      if (!st[o.key].length) return
+      if (out === j) out = { ...j }
+      out[o.key] = Math.max(1, stepDays(st[o.key]))
+    })
+    return out
+  }), [jobs, stepsByJob])
+
   const { scheduled, scheduleError } = useMemo(() => {
     try {
       const list = leveled
-        ? levelSchedule(jobs, caps, today, cal)
-        : jobs.map((j) => scheduleJob(j, today, cal))
+        ? levelSchedule(units, caps, today, cal)
+        : units.map((j) => scheduleJob(j, today, cal))
       return { scheduled: list.sort((a, b) => a.mustStart - b.mustStart), scheduleError: '' }
     } catch (err) {
       // A calendar with nearly everything switched off leaves the scheduler with
       // nowhere to put the work; say so instead of showing a half-built board.
       return { scheduled: [], scheduleError: String((err && err.message) || err) }
     }
-  }, [jobs, caps, leveled, today, cal])
+  }, [units, caps, leveled, today, cal])
 
   // Dragging a planned bar places that stage by hand: the middle of the bar
   // moves it, either edge stretches it.
@@ -437,9 +521,14 @@ export default function App() {
   // the stage ends up exactly where it was dropped, every time.
   const dragStage = useCallback((jobId, key, mode, deltaDays) => {
     if (!pinsEnabled) return
-    const job = jobs.find((j) => j.id === jobId)
+    const job = units.find((j) => j.id === jobId)
     const sched = scheduled.find((j) => j.id === jobId)
     if (!job || !sched) return
+    // A station built from steps is as long as its steps; stretching the bar
+    // would write a day count the rollup then ignores, so the bar would spring
+    // back. Moving it is still fine — that changes when, not how long.
+    const built = (stepsByJob.get(jobId) || {})[key]
+    if (mode !== 'move' && built && built.length) return
     const span = sched.spans[key]
     // A stage cannot begin on a day the shop is shut, so a bar dropped on one
     // takes the nearest working day *in the direction it was dragged*. Always
@@ -464,7 +553,7 @@ export default function App() {
       pins: { ...job.pins, [key]: start },
       ...(Math.max(1, dur) === job[key] ? {} : { [key]: Math.max(1, dur) }),
     })
-  }, [jobs, scheduled, cal, pinsEnabled, saveJob])
+  }, [units, scheduled, stepsByJob, cal, pinsEnabled, saveJob])
 
   // Hand a stage back to the scheduler.
   const releasePin = useCallback((job, key) => {
@@ -477,9 +566,9 @@ export default function App() {
   // Where the work actually lands: remaining work pushed forward from today.
   // The plan above says when work *should* happen; this says when it will.
   const { projected, projectError } = useMemo(() => {
-    try { return { projected: projectSchedule(jobs, caps, today, cal), projectError: '' } }
+    try { return { projected: projectSchedule(units, caps, today, cal), projectError: '' } }
     catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
-  }, [jobs, caps, today, cal])
+  }, [units, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
@@ -514,7 +603,7 @@ export default function App() {
   // holds still when the capacity toggle is flipped.
   const stagesById = useMemo(() => {
     const m = new Map()
-    jobs.forEach((j) => {
+    units.forEach((j) => {
       let plan = null
       // A calendar with nearly everything switched off leaves nowhere to put
       // the work; the actual dates are still worth showing without the plan.
@@ -522,9 +611,9 @@ export default function App() {
       m.set(j.id, stageDates(j, plan, logByJob.get(j.id), projById.get(j.id), cal))
     })
     return m
-  }, [jobs, logByJob, projById, today, cal])
+  }, [units, logByJob, projById, today, cal])
   const slipping = projected.filter((p) => p.slipping).length
-  const onFloor = jobs.filter(underway).length
+  const onFloor = units.filter(underway).length
 
   const { days, months } = useMemo(() => {
     let min = today, max = addDays(today, 14)
@@ -782,13 +871,13 @@ export default function App() {
   // Every unit's stations, flattened for the report, in delivery order.
   const stageDateRows = useMemo(() => {
     const out = []
-    ;[...jobs]
+    ;[...units]
       .sort((a, b) => a.delivery - b.delivery
         || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true }))
       .forEach((j) => (stagesById.get(j.id) || [])
         .forEach((st) => out.push({ ...st, jobId: j.id, unit: j.unit })))
     return out
-  }, [jobs, stagesById])
+  }, [units, stagesById])
 
   const dayIndex = (d) => daysBetween(days[0], d)
 
@@ -834,6 +923,7 @@ export default function App() {
   const selPart = sel ? partsById.get(sel.partId) : null
   const selProj = sel ? projById.get(sel.id) : null
   const selStages = sel ? stagesById.get(sel.id) : null
+  const selSteps = sel ? stepsByJob.get(sel.id) : null
   // Days done on the station in progress according to the shop's own days-left,
   // which is known even when nobody recorded the day the station opened.
   const selLive = sel && sel.stage !== 'none' && sel.stage !== 'done' ? sel.stage : null
@@ -949,6 +1039,12 @@ export default function App() {
             <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
               pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
               onDragStage={pinsEnabled ? dragStage : undefined}
+              steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
+              onToggleOpen={() => setOpenUnits((o) => {
+                const n = new Set(o)
+                if (n.has(j.id)) n.delete(j.id); else n.add(j.id)
+                return n
+              })}
               selected={selected === j.id}
               onSelect={() => setSelected(selected === j.id ? null : j.id)} />
           ))}
@@ -1009,11 +1105,61 @@ export default function App() {
               </select>
             </div>
           )}
-          {OPS.map((o) => (
-            <div className="field" key={o.key}><span>{o.label} (working days)</span>
-              <input className="num" type="number" min="1" value={sel[o.key]}
-                onChange={(e) => saveJob(sel.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} /></div>
-          ))}
+          {OPS.map((o) => {
+            const list = selSteps ? selSteps[o.key] : []
+            const built = list.length > 0
+            return (
+              <div className="field" key={o.key}>
+                <span>{o.label} (working days)</span>
+                {/* A station built from steps shows what they add up to; the
+                    number is no longer something to type. */}
+                {built
+                  ? <span className="num built" title={`${list.length} step${list.length === 1 ? '' : 's'} — edit them below`}>
+                      {sel[o.key]} <i>from steps</i>
+                    </span>
+                  : <input className="num" type="number" min="1" value={sel[o.key]}
+                      onChange={(e) => saveJob(sel.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
+              </div>
+            )
+          })}
+
+          {stepsEnabled && (
+            <div className="panelsect">
+              <h4>Steps</h4>
+              {OPS.map((o) => {
+                const list = selSteps ? selSteps[o.key] : []
+                return (
+                  <div className="stepgroup" key={o.key}>
+                    <div className="stephead">
+                      <span className={`chip ${o.key}`}><i />{o.label}</span>
+                      <span className="muted">{list.length
+                        ? `${list.filter((x) => x.done).length} of ${list.length} done · ${sel[o.key]} d`
+                        : `${sel[o.key]} d, not broken down`}</span>
+                      <button className="btn sm" onClick={() => addStep(sel, o.key)}>Add step</button>
+                    </div>
+                    {list.map((st) => (
+                      <div className={`steprow${st.done ? ' done' : ''}`} key={st.id}>
+                        <input type="checkbox" checked={st.done} title="Done"
+                          onChange={(e) => saveStep(st.id, { done: e.target.checked })} />
+                        <input className="stepname" value={st.name} placeholder="What happens in this step"
+                          onChange={(e) => saveStep(st.id, { name: e.target.value })} />
+                        <input className="stepdays" type="number" min="1" value={st.days}
+                          title="Working days"
+                          onChange={(e) => saveStep(st.id, { days: Math.max(1, parseInt(e.target.value) || 1) })} />
+                        <span className="dlabel">d</span>
+                        <button className="stepdel" title="Remove this step"
+                          onClick={() => removeStep(st.id)}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
+              <p className="foot">A station with steps takes as long as its steps add up to, so its day
+                count is built rather than typed. The typed number is kept underneath and comes back
+                if every step is removed. Ticking a step marks it done; it does not shorten the
+                station, because the work still took the days it took.</p>
+            </div>
+          )}
           {trackingEnabled && (
             <div className="stagebox">
               <div className="field"><span>Stage</span>
@@ -1803,7 +1949,9 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
 
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
-function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage }) {
+function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage,
+  steps, open, onToggleOpen }) {
+  const hasSteps = steps && OPS.some((o) => steps[o.key].length)
   // The drag in progress, held on the row so a pointer move repaints one row
   // rather than the whole board. It is a preview only — nothing is written
   // until the pointer comes up, so a drag can be abandoned by putting the bar
@@ -1831,7 +1979,12 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   return (
     <>
       <div className={`rowlabel ${selected ? 'sel' : ''}`} onClick={onSelect}>
-        <div className="unit">{j.unit}
+        <div className="unit">
+          {hasSteps && (
+            <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
+              onClick={(e) => { e.stopPropagation(); onToggleOpen() }}>{open ? '▾' : '▸'}</button>
+          )}
+          {j.unit}
           {tracking && proj && proj.slipping && <span className="flag">+{proj.variance}d</span>}
           {!tracking && j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}
           {j.conflict && <span className="flag seq" title="A stage is pinned across one that has to come before it. Move it, or release the pin.">OVERLAP</span>}
@@ -1843,7 +1996,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
       <div className="rowtrack" style={{ gridColumn: `span ${days.length}` }}>
         <div className="cellrow" style={{ gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
           {days.map((d, i) => (
-            <div key={i} className={`cell ${!cal.isWorkday(d) ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''}`} />
+            <div key={i}
+              className={`cell${!cal.isWorkday(d) ? ' we' : ''}${d.getTime() === todayT ? ' todaycol' : ''}${open && hasSteps ? ' tall' : ''}`} />
           ))}
         </div>
         {/* upper lane: the plan the unit was sold on — and the lane you drag */}
@@ -1858,6 +2012,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             else { const d = Math.min(snap, w - COL); x += d; w -= d }
           }
           const pinned = Boolean(j.pins && j.pins[o.key])
+          const built = Boolean(steps && steps[o.key].length)
           return <div key={o.key}
             className={`bar plan${j.late && o.key === 'fab' ? ' latefab' : ''}`
               + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
@@ -1867,9 +2022,12 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             onPointerCancel={onDragStage ? up : undefined}
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
               + (pinned ? ' — placed by hand' : '')
-              + (onDragStage ? '. Drag to move it, drag an edge to change how long it takes.' : '')}
+              + (built ? (steps[o.key].length === 1
+                  ? `. 1 step, ${j[o.key]} days — edit it to change the station's length`
+                  : `. ${steps[o.key].length} steps add up to ${j[o.key]} days — edit them to change the station's length`) : '')
+              + (onDragStage ? '. Drag to move it.' : '')}
             style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
-            {onDragStage && <><span className="grip l" /><span className="grip r" /></>}
+            {onDragStage && !built && <><span className="grip l" /><span className="grip r" /></>}
           </div>
         })}
         {/* lower lane: where the remaining work actually lands. Same colour as
@@ -1884,6 +2042,26 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           return <div key={`p-${o.key}`} className="bar proj"
             title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
             style={{ left: x + 1, width: w - 3, background: o.color }} />
+        })}
+        {/* the steps a station breaks into, tiled across its own block. They
+            add up to exactly the station's length, so the last one ends where
+            the station does and there is never a gap or an overhang. */}
+        {open && hasSteps && OPS.map((o) => {
+          const list = steps[o.key]
+          if (!list.length) return null
+          const s = j.spans[o.key]
+          return stepSpans(s.start, list, cal).map((st) => {
+            const x = dayIndex(st.start) * COL
+            const w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
+            return (
+              <div key={st.id} className={`bar step${st.done ? ' done' : ''}`}
+                title={`${o.label}: ${st.name || 'unnamed step'} — ${st.days} d, ${fmt(st.start)} – ${fmt(st.end)}`
+                  + (st.done ? ' (done)' : '')}
+                style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
+                <span>{st.name || '—'}</span>
+              </div>
+            )
+          })
         })}
         <div className="delmark" style={{ left: dayIndex(j.delivery) * COL + COL / 2 }} />
       </div>
@@ -1986,6 +2164,15 @@ function Style() {
     .rowtrack { position: relative; }
     .cellrow { display: grid; }
     .cell { border-top: 1px solid #E4E8EA; border-left: 1px solid #F0F2F3; height: 46px; position: relative; }
+    .cell.tall { height: 68px; }
+    /* third lane: the steps inside each station */
+    .bar.step { top: 41px; height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
+      display: flex; align-items: center; padding: 0 4px; }
+    .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar.step.done { opacity: .55; }
+    .bar.step.done span { text-decoration: line-through; }
+    .twist { border: 0; background: none; cursor: pointer; font-size: 10px; color: #5B6670; padding: 0 3px 0 0; line-height: 1; }
+    .twist:hover { color: #1B2126; }
     .cell.we { background: #F5F6F7; }
     .cell.todaycol::after, .lcell.todaycol::after { content: ''; position: absolute; inset: 0; border-left: 2px solid #1B2126; }
     /* two lanes: the plan on top, where the work actually lands beneath it */
@@ -2118,6 +2305,20 @@ function Style() {
     .panelsect { margin: 14px 0 4px; display: flex; flex-direction: column; gap: 7px; }
     .panelsect h4 { margin: 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #5B6670; }
     .panelsect .foot { margin: 0; font-size: 11px; color: #7A848C; line-height: 1.5; }
+    .num.built { font-variant-numeric: tabular-nums; font-weight: 600; color: #3A434B; padding: 6px 0; }
+    .num.built i { font-style: normal; font-size: 11px; font-weight: 400; color: #7A848C; }
+    .stepgroup { border-top: 1px solid #E4E8EA; padding: 8px 0 4px; }
+    .stepgroup:first-of-type { border-top: 0; }
+    .stephead { display: flex; align-items: center; gap: 9px; margin-bottom: 5px; }
+    .stephead .muted { flex: 1; font-size: 11px; }
+    .steprow { display: flex; align-items: center; gap: 7px; padding: 2px 0 2px 4px; }
+    .steprow input[type=checkbox] { accent-color: #3E7C59; width: 14px; height: 14px; cursor: pointer; flex: none; }
+    .stepname { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; padding: 4px 7px; border: 1px solid #C6CDD1; border-radius: 3px; }
+    .stepdays { width: 46px; flex: none; font-family: inherit; font-size: 12px; padding: 4px 5px; border: 1px solid #C6CDD1; border-radius: 3px; text-align: center; }
+    .dlabel { font-size: 11px; color: #7A848C; }
+    .stepdel { border: 0; background: none; cursor: pointer; color: #7A848C; font-size: 15px; line-height: 1; padding: 0 4px; border-radius: 3px; }
+    .stepdel:hover { background: #F3D2CE; color: #7C221B; }
+    .steprow.done .stepname { color: #7A848C; text-decoration: line-through; }
     .panelsect table.report { font-size: 12px; }
     .panelsect table.report th { padding: 6px 7px; font-size: 9px; letter-spacing: .04em; }
     .panelsect table.report td { padding: 6px 7px; }

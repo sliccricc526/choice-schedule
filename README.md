@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog, production tracking or pinned stages existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages or step lists existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -105,6 +105,29 @@ would bury the one that matters. A delivery landing on a shaded day is worth a s
 The header counts the month's deliveries and how many of them the projection says will miss. With no
 deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
 read as a broken one.
+
+### Breaking a station into steps
+
+A unit's fabrication is one number of days until you say what it is made of. In the unit panel, each
+station takes a list of steps — *cut rails*, *weld deck*, *install king pin* — with a day count and
+a tick for done.
+
+**A station with steps takes as long as its steps add up to.** Its day count stops being typed and
+starts being built, which is the point: the schedule comes from real work instead of one estimate.
+The typed number is kept underneath and comes back the moment the last step is removed, so breaking
+a station down is never destructive — and the first step on a station inherits the whole typed
+count, so nothing on the board jumps when you start.
+
+On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
+tiled across their station's block in order, each as wide as its days. They add up to exactly the
+station's length, so the last one ends where the station does — there is never a gap or an overhang.
+
+Two consequences worth knowing:
+
+- A station built from steps **cannot be stretched by dragging its edge**, because its length is the
+  sum. Drag the middle to move it as usual; change the steps to change how long it takes.
+- **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
+  time. Days left on a station is still its own figure.
 
 ### Reading the load, and ordering the rows
 
