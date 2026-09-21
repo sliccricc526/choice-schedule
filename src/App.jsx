@@ -640,6 +640,52 @@ export default function App() {
     catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
   }, [units, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
+
+  // Dragging the projection — the lower, solid lane. It is derived, so a drag
+  // has to land somewhere real:
+  //
+  //   a station not started yet  middle pins it, an edge sets its days
+  //   the station running now    an edge sets the days the shop says are left
+  //
+  // Moving the running station is refused. Its work is happening now; a bar
+  // that says otherwise would be the board disagreeing with the shop floor.
+  const dragProjected = useCallback((jobId, key, mode, deltaDays) => {
+    const job = units.find((j) => j.id === jobId)
+    const proj = projById.get(jobId)
+    const span = proj && proj.spans[key]
+    if (!job || !span) return
+    const running = (job.stage || 'none') === key
+    const onWork = (d, dir) => (cal.isWorkday(d) ? strip(d)
+      : dir < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d))
+
+    if (mode === 'move' || (mode === 'start' && !running)) {
+      if (running || !pinsEnabled) return
+      const start = onWork(addDays(span.start, deltaDays), deltaDays)
+      const patch = { pins: { ...job.pins, [key]: start } }
+      // The left edge moves the start and holds the finish, so it resizes too.
+      if (mode === 'start') {
+        const days = workdaysInclusive(start > span.end ? strip(span.end) : start, span.end, cal)
+        const built = (stepsByJob.get(jobId) || {})[key]
+        if (!(built && built.length)) patch[key] = Math.max(1, days)
+      }
+      saveJob(jobId, patch)
+      return
+    }
+    if (mode !== 'end') return
+    const end = addDays(span.end, deltaDays)
+    const days = Math.max(running ? 0 : 1,
+      workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
+    if (running) {
+      // What is left on the station the unit is standing in.
+      if (days !== (job.daysLeft == null ? job[key] : job.daysLeft)) saveJob(jobId, { daysLeft: days })
+      return
+    }
+    // A station built from steps is as long as its steps; the number would be
+    // written and then ignored, so the bar would spring back.
+    const built = (stepsByJob.get(jobId) || {})[key]
+    if (built && built.length) return
+    if (days !== job[key]) saveJob(jobId, { [key]: days })
+  }, [units, projById, stepsByJob, cal, pinsEnabled, saveJob])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
   // Closed stations by unit, then by station.
@@ -1122,6 +1168,7 @@ export default function App() {
               onDragStage={pinsEnabled ? dragStage : undefined}
               steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
               onDragStep={stepsEnabled ? dragStep : undefined}
+              onDragProjected={trackingEnabled ? dragProjected : undefined}
               onToggleOpen={() => setOpenUnits((o) => {
                 const n = new Set(o)
                 if (n.has(j.id)) n.delete(j.id); else n.add(j.id)
@@ -2132,7 +2179,7 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
 function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage,
-  steps, open, onToggleOpen, onDragStep }) {
+  steps, open, onToggleOpen, onDragStep, onDragProjected }) {
   const hasSteps = steps && OPS.some((o) => steps[o.key].length)
   // Parallel steps overlap in time, so each station's steps are spread over as
   // many lines as it takes for none of them to sit on top of another, and the
@@ -2154,22 +2201,25 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   const [drag, setDrag] = useState(null)
   const snap = drag ? Math.round(drag.dx / COL) * COL : 0
 
-  const down = (e, key, stepId) => {
-    if (e.button) return
-    if (stepId ? !onDragStep : !onDragStage) return
+  // One gesture, three kinds of bar. `lane` says which, so the preview knows
+  // what to move and the release knows where to write.
+  const handler = { plan: onDragStage, proj: onDragProjected, step: onDragStep }
+  const down = (e, lane, key, stepId) => {
+    if (e.button || !handler[lane]) return
     const g = e.target.classList
     const mode = g.contains('grip') ? (g.contains('l') ? 'start' : 'end') : 'move'
     e.preventDefault()
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setDrag({ key, stepId, mode, x0: e.clientX, dx: 0 })
+    setDrag({ lane, key, stepId, mode, x0: e.clientX, dx: 0 })
   }
   const move = (e) => setDrag((d) => (d ? { ...d, dx: e.clientX - d.x0 } : d))
   const up = () => setDrag((d) => {
     if (d) {
       const n = Math.round(d.dx / COL)
       if (n !== 0) {
-        if (d.stepId) onDragStep(j.id, d.key, d.stepId, d.mode, n)
+        if (d.lane === 'step') onDragStep(j.id, d.key, d.stepId, d.mode, n)
+        else if (d.lane === 'proj') onDragProjected(j.id, d.key, d.mode, n)
         else onDragStage(j.id, d.key, d.mode, n)
       }
     }
@@ -2204,7 +2254,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
         {OPS.map((o) => {
           const s = j.spans[o.key]
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          const live = drag && drag.key === o.key && !drag.stepId
+          const live = drag && drag.lane === 'plan' && drag.key === o.key
           if (live) {
             if (drag.mode === 'move') x += snap
             else if (drag.mode === 'end') w = Math.max(COL, w + snap)
@@ -2216,7 +2266,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           return <div key={o.key}
             className={`bar plan${j.late && o.key === 'fab' ? ' latefab' : ''}`
               + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
-            onPointerDown={onDragStage ? (e) => down(e, o.key) : undefined}
+            onPointerDown={onDragStage ? (e) => down(e, 'plan', o.key) : undefined}
             onPointerMove={onDragStage ? move : undefined}
             onPointerUp={onDragStage ? up : undefined}
             onPointerCancel={onDragStage ? up : undefined}
@@ -2238,10 +2288,34 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
         {tracking && proj && (underway(j) || proj.slipping) && OPS.map((o) => {
           const s = proj.spans[o.key]
           if (!s) return null
-          const x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          return <div key={`p-${o.key}`} className="bar proj"
-            title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
-            style={{ left: x + 1, width: w - 3, background: o.color }} />
+          let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
+          const liveProj = drag && drag.lane === 'proj' && drag.key === o.key
+          if (liveProj) {
+            if (drag.mode === 'move') x += snap
+            else if (drag.mode === 'end') w = Math.max(COL, w + snap)
+            else { const d = Math.min(snap, w - COL); x += d; w -= d }
+          }
+          // The station the unit is standing in is running: its work is
+          // happening now, so it can be shortened or lengthened but not moved.
+          const running = (j.stage || 'none') === o.key
+          const built = Boolean(steps && steps[o.key].length)
+          return (
+            <div key={`p-${o.key}`}
+              className={`bar proj${onDragProjected ? ' draggable' : ''}${running ? ' running' : ''}${liveProj ? ' dragging' : ''}`}
+              onPointerDown={onDragProjected ? (e) => down(e, 'proj', o.key) : undefined}
+              onPointerMove={onDragProjected ? move : undefined}
+              onPointerUp={onDragProjected ? up : undefined}
+              onPointerCancel={onDragProjected ? up : undefined}
+              title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
+                + (!onDragProjected ? ''
+                  : running ? '. Running now — drag the right edge to change the days left'
+                  : built ? '. Drag to place it; its length comes from its steps'
+                  : '. Drag to place it, drag an edge to change its days')}
+              style={{ left: x + 1, width: w - 3, background: o.color }}>
+              {onDragProjected && !running && <span className="grip l" />}
+              {onDragProjected && !(built && !running) && <span className="grip r" />}
+            </div>
+          )
         })}
         {/* the steps each station breaks into. Two that run side by side are
             drawn side by side, on their own lines, because that is what the
@@ -2249,7 +2323,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
         {laid.map(({ op, spans, lane }) => spans.map((st) => {
           let x = dayIndex(st.start) * COL
           let w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
-          const liveStep = drag && drag.stepId === st.id
+          const liveStep = drag && drag.lane === 'step' && drag.stepId === st.id
           if (liveStep) {
             if (drag.mode === 'move') x += snap
             else if (drag.mode === 'end') w = Math.max(COL, w + snap)
@@ -2259,7 +2333,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           return (
             <div key={st.id}
               className={`bar step${st.done ? ' done' : ''}${onDragStep ? ' draggable' : ''}${liveStep ? ' dragging' : ''}`}
-              onPointerDown={onDragStep ? (e) => down(e, op.key, st.id) : undefined}
+              onPointerDown={onDragStep ? (e) => down(e, 'step', op.key, st.id) : undefined}
               onPointerMove={onDragStep ? move : undefined}
               onPointerUp={onDragStep ? up : undefined}
               onPointerCancel={onDragStep ? up : undefined}
@@ -2399,6 +2473,10 @@ function Style() {
     .bar { position: absolute; top: 12px; height: 20px; border-radius: 3px; }
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
     .bar.proj { top: 24px; height: 13px; }
+    .bar.proj.draggable { cursor: grab; touch-action: none; }
+    .bar.proj.draggable.running { cursor: default; }
+    .bar.proj.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
+    .bar.proj.draggable:hover .grip { background: #FFF; opacity: .5; border-radius: 2px; }
     .bar.latefab { outline: 2px solid #B3382E; }
     /* the plan is the lane you drag: move from the middle, stretch from an edge */
     .bar.plan.draggable { cursor: grab; touch-action: none; }

@@ -135,6 +135,14 @@ name, station, days, the dates it runs between, and what it waits for — the wa
 A step's row spans the table rather than lining up with the columns above it, because the Unit
 column is 130px of work-order number and the columns beside it mean something else entirely.
 
+The projection — the lower, solid lane — drags too, and what it writes depends on the station:
+
+- **A station not started yet** takes the same two gestures as its plan bar: the middle places it,
+  an edge sets its days.
+- **The station a unit is standing in** is running, so it cannot be moved — its work is happening
+  now, and a bar saying otherwise would be the board disagreeing with the shop floor. Its right edge
+  sets the **days left**, which until now could only be typed in the table or the panel.
+
 Step bars take the same two gestures the station bars do. **Drag an edge** to change how long a step
 takes. **Drag the middle** to hold it back: a step has no start date of its own, so moving one sets
 its *lag* — the working days it waits beyond whatever it waits on. Dragging left therefore stops at
