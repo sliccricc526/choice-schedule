@@ -888,6 +888,24 @@ export default function App() {
       return !v
     })
   }, [])
+  // The order of the table's columns. Different people read the book
+  // differently -- the office wants the dates first, the shop wants the stage
+  // and the days left -- so the order is theirs to set, and it stays put like
+  // the sort choice and the column width. null means the order it ships with.
+  const [columnOrder, setColumnOrder] = useState(() => {
+    try {
+      const v = JSON.parse(window.localStorage.getItem('tableColumns'))
+      return Array.isArray(v) && v.every((k) => typeof k === 'string') ? v : null
+    } catch { return null }
+  })
+  const moveColumns = useCallback((order) => {
+    setColumnOrder(order)
+    try {
+      if (order) window.localStorage.setItem('tableColumns', JSON.stringify(order))
+      else window.localStorage.removeItem('tableColumns')
+    } catch { /* private window */ }
+  }, [])
+
   // Complete is the stage the shop set, not something inferred from the dates:
   // a unit is done when someone says it is done.
   const [doneRows, liveRows] = useMemo(() => {
@@ -1271,7 +1289,8 @@ export default function App() {
             return n
           })}
           onSaveStep={saveStep} onToggleNeed={toggleNeed}
-          showDone={showDone} onToggleDone={toggleDone} />
+          showDone={showDone} onToggleDone={toggleDone}
+          columnOrder={columnOrder} onMoveColumns={moveColumns} />
       ) : view === 'calendar' ? (
         <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
           today={today} tracking={trackingEnabled} selected={selected}
@@ -1573,7 +1592,13 @@ function SignIn() {
 
 function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
-  showDone, onToggleDone }) {
+  showDone, onToggleDone, columnOrder, onMoveColumns }) {
+  // Which column is being dragged, and which one the pointer is over. Transient
+  // -- where the columns end up is the caller's to keep.
+  const [dragCol, setDragCol] = useState(null)
+  const [overCol, setOverCol] = useState(null)
+  // Hooks first, then the empty case: a return above them would make the hook
+  // calls conditional the moment the last unit is deleted.
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // How wide a step's own row has to be to reach the end of the table.
   const colSpan = 2 + (tracking ? 3 : 0) + 2 + (partsEnabled ? 1 : 0) + 1 + OPS.length
@@ -1588,18 +1613,6 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     if (next) next.focus()
     else e.currentTarget.blur()
   }
-  // Every column sorts. The arrow marks the one in force and which way.
-  const th = (key, label, className) => (
-    <th key={key} className={className}>
-      <button type="button" className={`sortbtn ${sort.key === key ? 'on' : ''}`}
-        onClick={() => onSort(key)}
-        title={`Sort by ${label.toLowerCase()}`}
-        aria-sort={sort.key === key ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>
-        {label}<span className="arrow">{sort.key === key ? (sort.dir > 0 ? '▲' : '▼') : ''}</span>
-      </button>
-    </th>
-  )
-
   const variance = (p) => {
     if (!p) return { text: '—', cls: '' }
     if (p.complete) return { text: 'complete', cls: 'good' }
@@ -1607,6 +1620,178 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     if (p.variance < 0) return { text: `${Math.abs(p.variance)}d slack`, cls: 'good' }
     return { text: 'on target', cls: '' }
   }
+
+  // The columns, in the order they are drawn, each one carrying its own heading
+  // and its own cell. One list rather than two matching ones: a heading and the
+  // cells under it cannot drift apart if they are the same entry, which is what
+  // makes the order safe to move.
+  const defs = [
+    {
+      key: 'unit', label: 'Unit', cls: 'w-unit',
+      cell: ({ j, hasSteps, open }) => (
+        <td key="unit" className="unitcell"><div className="cellflex">
+          {hasSteps
+            ? <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
+                onClick={() => onToggleOpen(j.id)}>{open ? '−' : '+'}</button>
+            : <span className="twist gap" />}
+          <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
+        </div></td>
+      ),
+    },
+    {
+      key: 'delivery', label: 'Target date', cls: 'w-date',
+      cell: ({ j, i }) => (
+        <td key="delivery">
+          <input type="date" data-daterow={i} value={isoDate(j.delivery)}
+            onKeyDown={toNextDate}
+            onChange={(e) => e.target.value && onSave(j.id, { delivery: parseDate(e.target.value) })} />
+        </td>
+      ),
+    },
+    tracking && {
+      key: 'stage', label: 'Stage', cls: 'w-stage',
+      cell: ({ j, live }) => (
+        <td key="stage">
+          <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
+            title={live === 'done' ? 'Complete'
+              : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
+                + (live !== 'none' && !j.stageStarted ? ' — no start date set, so the days spent are not counted' : '')}>
+            <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
+          </button>
+        </td>
+      ),
+    },
+    tracking && {
+      key: 'since', label: 'In stage since', cls: 'w-since',
+      cell: ({ j, p, live, planned, over, done }) => (
+        <td key="since">
+          {planned ? (
+            <div className="since">
+              <input type="date" max={isoDate(today)}
+                value={j.stageStarted ? isoDate(j.stageStarted) : ''}
+                title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
+                onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
+              <span className={`sincedays ${over ? 'bad' : ''}`}>
+                {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}`
+                  : done > 0 ? `${done} of ${planned} d done · no start date`
+                  : `not started · ${planned} d booked`}
+              </span>
+            </div>
+          ) : <span className="calc">—</span>}
+        </td>
+      ),
+    },
+    tracking && {
+      key: 'left', label: 'Left', cls: 'w-num',
+      cell: ({ j, planned }) => (
+        <td key="left">
+          {planned
+            ? <input type="number" min="0" value={j.daysLeft == null ? planned : j.daysLeft}
+                onChange={(e) => onSave(j.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
+            : <span className="calc">—</span>}
+        </td>
+      ),
+    },
+    {
+      key: 'projected', label: 'Projected', cls: 'w-calc',
+      cell: ({ p }) => <td key="projected" className="calc">{p && p.projectedEnd ? fmtNum(p.projectedEnd) : '—'}</td>,
+    },
+    {
+      key: 'variance', label: 'Variance', cls: 'w-calc',
+      cell: ({ vr }) => <td key="variance" className={`calc ${vr.cls}`}>{vr.text}</td>,
+    },
+    partsEnabled && {
+      key: 'part', label: 'Part number', cls: 'w-pn',
+      cell: ({ j }) => (
+        <td key="part">
+          <select value={j.partId || ''} onChange={(e) => onApplyPart(j.id, e.target.value)}>
+            <option value="">—</option>
+            {parts.map((p2) => <option key={p2.id} value={p2.id}>{p2.part_number}</option>)}
+          </select>
+        </td>
+      ),
+    },
+    {
+      key: 'desc', label: 'Description',
+      cell: ({ j }) => (
+        <td key="desc"><input value={j.desc} onChange={(e) => onSave(j.id, { desc: e.target.value })} /></td>
+      ),
+    },
+    ...OPS.map((o) => ({
+      key: o.key, label: SHORT[o.key], cls: 'w-num',
+      cell: ({ j, st }) => {
+        const built = Boolean(st && st[o.key].length)
+        return (
+          <td key={o.key}>
+            {/* built from steps: the number is the longest chain, not something to type */}
+            {built
+              ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
+              : <input type="number" min="1" value={j[o.key]}
+                  onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
+          </td>
+        )
+      },
+    })),
+  ].filter(Boolean)
+
+  // A remembered order goes stale: a column can be switched off since it was
+  // saved, and a new one will not be in it at all. Keep the columns it names in
+  // the order it names them, then put anything it is missing back at the place
+  // it would have had by default, rather than dumping it on the end.
+  const cols = (() => {
+    const pos = new Map((columnOrder || []).map((k, n) => [k, n]))
+    const out = defs.filter((d) => pos.has(d.key)).sort((a, b) => pos.get(a.key) - pos.get(b.key))
+    defs.forEach((d, n) => { if (!pos.has(d.key)) out.splice(Math.min(n, out.length), 0, d) })
+    return out
+  })()
+  const moved = cols.some((c, n) => c.key !== defs[n].key)
+
+  // Dropping on a column puts the dragged one in its place: after it when the
+  // drag came from the left, before it when it came from the right -- which is
+  // the side the pointer is already on. Which column is moving comes off the
+  // drag itself rather than out of state: the state is there to grey the
+  // heading, and reading a render's copy of it to decide where a column lands
+  // would be trusting a re-render to have happened first.
+  const dropOn = (from, target) => {
+    const keys = cols.map((c) => c.key)
+    if (!from || from === target || !keys.includes(from)) return
+    const after = keys.indexOf(from) < keys.indexOf(target)
+    const next = keys.filter((k) => k !== from)
+    next.splice(next.indexOf(target) + (after ? 1 : 0), 0, from)
+    onMoveColumns(next)
+    setDragCol(null)
+    setOverCol(null)
+  }
+
+  // Every column sorts, and every column moves. The arrow marks the one sorted
+  // and which way; dragging the heading puts the column somewhere else. A click
+  // still sorts -- a drag is a drag, and the browser tells the two apart for
+  // us. That is why this is HTML drag and drop rather than the pointer handling
+  // the bars use: capturing a pointer here would swallow the click.
+  const th = (col) => (
+    <th key={col.key} className={`${col.cls || ''} draghead`
+      + (dragCol === col.key ? ' dragging' : '')
+      + (overCol === col.key && dragCol && dragCol !== col.key ? ' dropinto' : '')}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move'
+        // Firefox starts no drag at all unless the transfer carries something.
+        e.dataTransfer.setData('text/plain', col.key)
+        setDragCol(col.key)
+      }}
+      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOverCol(col.key) }}
+      onDragLeave={() => setOverCol((k) => (k === col.key ? null : k))}
+      onDrop={(e) => { e.preventDefault(); dropOn(e.dataTransfer.getData('text/plain') || dragCol, col.key) }}
+      onDragEnd={() => { setDragCol(null); setOverCol(null) }}>
+      <button type="button" className={`sortbtn ${sort.key === col.key ? 'on' : ''}`}
+        onClick={() => onSort(col.key)}
+        title={`Sort by ${col.label.toLowerCase()} — or drag the heading to move the column`}
+        aria-sort={sort.key === col.key ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>
+        {col.label}<span className="arrow">{sort.key === col.key ? (sort.dir > 0 ? '▲' : '▼') : ''}</span>
+      </button>
+    </th>
+  )
+
 
   // Finished units are listed together above the live ones rather than mixed
   // through them, and fold away as a group. The running index carries across
@@ -1633,79 +1818,13 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     const st = stepsByJob ? stepsByJob.get(j.id) : null
     const hasSteps = Boolean(st && OPS.some((o) => st[o.key].length))
     const open = Boolean(openUnits && openUnits.has(j.id))
+    // Everything a cell might need, worked out once for the row rather than
+    // once per column.
+    const cell = { j, i, p, live, planned, over, done, vr, st, hasSteps, open }
     return (
       <Fragment key={j.id}>
       <tr className={p && p.slipping ? 'late' : ''}>
-        <td className="unitcell"><div className="cellflex">
-          {hasSteps
-            ? <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
-                onClick={() => onToggleOpen(j.id)}>{open ? '−' : '+'}</button>
-            : <span className="twist gap" />}
-          <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
-        </div></td>
-        <td>
-          <input type="date" data-daterow={i} value={isoDate(j.delivery)}
-            onKeyDown={toNextDate}
-            onChange={(e) => e.target.value && onSave(j.id, { delivery: parseDate(e.target.value) })} />
-        </td>
-        {tracking && (
-          <td>
-            <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
-              title={live === 'done' ? 'Complete'
-                : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
-                  + (live !== 'none' && !j.stageStarted ? ' — no start date set, so the days spent are not counted' : '')}>
-              <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
-            </button>
-          </td>
-        )}
-        {tracking && (
-          <td>
-            {planned ? (
-              <div className="since">
-                <input type="date" max={isoDate(today)}
-                  value={j.stageStarted ? isoDate(j.stageStarted) : ''}
-                  title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
-                  onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
-                <span className={`sincedays ${over ? 'bad' : ''}`}>
-                  {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}`
-                    : done > 0 ? `${done} of ${planned} d done · no start date`
-                    : `not started · ${planned} d booked`}
-                </span>
-              </div>
-            ) : <span className="calc">—</span>}
-          </td>
-        )}
-        {tracking && (
-          <td>
-            {planned
-              ? <input type="number" min="0" value={j.daysLeft == null ? planned : j.daysLeft}
-                  onChange={(e) => onSave(j.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
-              : <span className="calc">—</span>}
-          </td>
-        )}
-        <td className="calc">{p && p.projectedEnd ? fmtNum(p.projectedEnd) : '—'}</td>
-        <td className={`calc ${vr.cls}`}>{vr.text}</td>
-        {partsEnabled && (
-          <td>
-            <select value={j.partId || ''} onChange={(e) => onApplyPart(j.id, e.target.value)}>
-              <option value="">—</option>
-              {parts.map((p2) => <option key={p2.id} value={p2.id}>{p2.part_number}</option>)}
-            </select>
-          </td>
-        )}
-        <td><input value={j.desc} onChange={(e) => onSave(j.id, { desc: e.target.value })} /></td>
-        {OPS.map((o) => {
-          const built = Boolean(st && st[o.key].length)
-          return (
-            <td key={o.key}>
-              {/* built from steps: the number is the longest chain, not something to type */}
-              {built
-                ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
-                : <input type="number" min="1" value={j[o.key]}
-                    onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
-            </td>
-          )
-        })}
+        {cols.map((c) => c.cell(cell))}
       </tr>
   
       {/* The unit's steps, listed under it the way a work order reads:
@@ -1762,24 +1881,18 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   return (
     <div className="tablewrap">
       <div className="tablehint">
-        <span>Click a column to sort. Enter a target date and press <kbd>Enter</kbd> to drop
-          to the next one — rows hold their place while you type.</span>
+        <span>Click a column to sort, or drag its heading to move it. Enter a target date and
+          press <kbd>Enter</kbd> to drop to the next one — rows hold their place while you type.</span>
         <button className="btn sm" onClick={onResort} title="Apply the current sort again">Re-sort</button>
+        {/* only worth offering once the order has actually been changed */}
+        {moved && (
+          <button className="btn sm" onClick={() => onMoveColumns(null)}
+            title="Put the columns back in their original order">Reset columns</button>
+        )}
       </div>
       <table className="orders">
         <thead>
-          <tr>
-            {th('unit', 'Unit', 'w-unit')}
-            {th('delivery', 'Target date', 'w-date')}
-            {tracking && th('stage', 'Stage', 'w-stage')}
-            {tracking && th('since', 'In stage since', 'w-since')}
-            {tracking && th('left', 'Left', 'w-num')}
-            {th('projected', 'Projected', 'w-calc')}
-            {th('variance', 'Variance', 'w-calc')}
-            {partsEnabled && th('part', 'Part number', 'w-pn')}
-            {th('desc', 'Description')}
-            {OPS.map((o) => th(o.key, SHORT[o.key], 'w-num'))}
-          </tr>
+          <tr>{cols.map(th)}</tr>
         </thead>
         <tbody>
           {doneList.length > 0 && (
@@ -2765,6 +2878,12 @@ function Style() {
        fold control sitting on the baseline of the label rather than above it */
     .secthead.grouphead { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
     .secthead.grouphead .twist { font-size: 13px; }
+    /* a heading you can pick up and move. The grab cursor is the only thing
+       that says so, so it is on the whole cell rather than on a handle. */
+    .orders th.draghead { cursor: grab; user-select: none; }
+    .orders th.draghead.dragging { opacity: .45; cursor: grabbing; }
+    /* where it would land, marked on the column being dropped onto */
+    .orders th.draghead.dropinto { background: #EDF2F6; box-shadow: inset 0 -3px 0 #44688F; }
     /* the same grouping in the table: one bar across every column */
     .orders tr.grouprow td { background: #F6F8F9; border-top: 2px solid #C6CDD1;
       font-size: 11px; font-weight: 700; color: #3A434B; padding: 7px 10px; }
