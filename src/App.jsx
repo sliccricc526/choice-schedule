@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef, Fragment } from 'react'
+import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, Fragment, cloneElement } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
@@ -17,6 +17,55 @@ const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric
 const fmtNum = (d) => d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
 
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
+
+// What a cell needs in order to show everything in it. The browser will not
+// answer this: an input is as wide as its CSS says whatever text is inside it,
+// so the text is measured directly and the boxes around it added back on.
+const measureText = (() => {
+  let ctx = null
+  return (text, s) => {
+    if (!text) return 0
+    if (!ctx) ctx = document.createElement('canvas').getContext('2d')
+    ctx.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`
+    // what is drawn, not what is in the DOM -- a chip holds "Fabrication" and
+    // shows FABRICATION, which is wider
+    const shown = s.textTransform === 'uppercase' ? text.toUpperCase()
+      : s.textTransform === 'lowercase' ? text.toLowerCase() : text
+    return ctx.measureText(shown).width + (parseFloat(s.letterSpacing) || 0) * shown.length
+  }
+})()
+
+const fitWidth = (node) => {
+  const s = getComputedStyle(node)
+  // Margins count: a stage chip carries one from the rule it is built on, and
+  // a column fitted without it wraps the chip onto two lines.
+  const box = parseFloat(s.paddingLeft) + parseFloat(s.paddingRight)
+    + parseFloat(s.borderLeftWidth) + parseFloat(s.borderRightWidth)
+    + parseFloat(s.marginLeft) + parseFloat(s.marginRight)
+  if (node.tagName === 'INPUT' || node.tagName === 'SELECT') {
+    // a date field and a select both draw a control the text knows nothing of
+    const control = node.tagName === 'SELECT' || node.type === 'date' ? 26 : 2
+    const text = node.tagName === 'SELECT'
+      ? ((node.options[node.selectedIndex] || {}).text || '')
+      : node.type === 'date' ? '00/00/0000' : node.value
+    return measureText(text, s) + box + control
+  }
+  const kids = [...node.childNodes]
+    .filter((n) => n.nodeType === 1 || (n.nodeType === 3 && n.textContent.trim()))
+  // Nothing to measure means the element is sized by its CSS, not by what is
+  // in it -- the spacer that keeps a unit without steps lined up, the dot on a
+  // stage chip. Its laid-out width is the honest answer. Only for the empty
+  // ones: anything holding text may have been stretched by the column it is
+  // already in, and asking it how wide it is would just give that width back.
+  if (!kids.length) return Math.max(box, node.offsetWidth || 0)
+  const sizes = kids.map((n) => (n.nodeType === 3 ? measureText(n.textContent.trim(), s) : fitWidth(n)))
+  // Only a flex column stacks its children. Everything else in this table runs
+  // across, so the widths add up rather than the widest one deciding.
+  const stacked = s.display.includes('flex') && s.flexDirection.startsWith('column')
+  return box + (stacked
+    ? Math.max(...sizes)
+    : sizes.reduce((a, b) => a + b, 0) + (parseFloat(s.columnGap) || 0) * (kids.length - 1))
+}
 
 // The stage-log report is time study, not scheduling, and the shop is not using
 // it yet. Closures carry on being recorded either way, so the history is there
@@ -971,11 +1020,33 @@ export default function App() {
     window.addEventListener('pointercancel', up)
   }, [])
 
+  // Whether the board has been put back where it was left. Until it has, its
+  // own scrolling is not somebody choosing a position and must not overwrite
+  // the stored one.
+  const placed = useRef(false)
+  const saveAt = useRef(0)
+  const daysRef = useRef([])
+
   // The divider is positioned against the board's scrolled content, while the
   // column it sits beside is stuck to the left edge — so it has to be pushed
   // back by however far the board has been scrolled to stay on the seam.
   const onBoardScroll = useCallback((e) => {
     if (gripRef.current) gripRef.current.style.transform = `translateX(${e.currentTarget.scrollLeft}px)`
+    // Remember where the board is, so coming back to it does not mean dragging
+    // back to where you were. Kept as the date at the left edge, not a pixel
+    // offset: the run of days moves whenever a delivery does, and an offset
+    // would then point at a different week. Held until the scrolling stops --
+    // writing on every scroll event would be a write per pixel.
+    if (!placed.current) return
+    const { scrollLeft, scrollTop } = e.currentTarget
+    clearTimeout(saveAt.current)
+    saveAt.current = setTimeout(() => {
+      const d = daysRef.current[Math.round(scrollLeft / COL)]
+      if (!d) return
+      try {
+        window.localStorage.setItem('boardAt', JSON.stringify({ d: isoDate(d), top: scrollTop }))
+      } catch { /* private window */ }
+    }, 250)
   }, [])
 
   // Grab the board itself and pull it around, the way you would a paper
@@ -1077,6 +1148,26 @@ export default function App() {
   }, [units, stagesById])
 
   const dayIndex = (d) => daysBetween(days[0], d)
+  daysRef.current = days
+
+  // Put the board back where it was left, once, each time it is opened. Before
+  // paint, so it does not show the left edge first and then jump. The stored
+  // date may have fallen outside the run of days since -- a delivery moved, a
+  // unit was finished -- so it is clamped rather than dropped: the nearest edge
+  // is closer to where they were than the beginning of the year is.
+  useLayoutEffect(() => {
+    if (view !== 'board') { placed.current = false; return }
+    const el = boardRef.current
+    if (!el || !days.length || placed.current) return
+    placed.current = true
+    let at = null
+    try { at = JSON.parse(window.localStorage.getItem('boardAt')) } catch { /* private window */ }
+    if (!at || !at.d) return
+    const i = Math.max(0, Math.min(days.length - 1, daysBetween(days[0], parseDate(at.d))))
+    el.scrollLeft = i * COL
+    el.scrollTop = at.top || 0
+    if (gripRef.current) gripRef.current.style.transform = `translateX(${el.scrollLeft}px)`
+  }, [view, days])
 
   const loads = useMemo(() => {
     const out = {}
@@ -1621,6 +1712,11 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   // check happens inside dragstart, which is why it is a ref: a state flag set
   // in pointerdown might not have re-rendered by then.
   const resizingRef = useRef(false)
+  // The widths as they stand now, for the handlers to build on. A handler that
+  // spread its own render's copy would drop a width set since it was made --
+  // the same trap as reading the dragged column out of state.
+  const widthsRef = useRef(columnWidths)
+  widthsRef.current = columnWidths
   // Hooks first, then the empty case: a return above them would make the hook
   // calls conditional the moment the last unit is deleted.
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
@@ -1795,7 +1891,9 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   const widthAt = (start, x0, x) => Math.round(Math.min(COLW_MAX, Math.max(COLW_MIN, start + x - x0)))
   const startResize = (e, key) => {
     if (e.button) return
-    e.preventDefault()
+    // No preventDefault here: cancelling pointerdown takes the mouse events
+    // built on top of it with it, and the double-click is one of those. Text
+    // selection is already off on the heading, which is what it would be for.
     e.stopPropagation()
     resizingRef.current = true
     const start = e.currentTarget.parentElement.getBoundingClientRect().width
@@ -1812,17 +1910,21 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
       // A click on the grip that moved nothing is not a resize. Recording it
       // would pin the column at its default and light up Reset columns for a
       // change nobody made.
-      if (width !== Math.round(start)) onResizeColumns({ ...(columnWidths || {}), [key]: width })
+      if (width !== Math.round(start)) onResizeColumns({ ...(widthsRef.current || {}), [key]: width })
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }
-  // Double-clicking the grip gives that one column its default back.
-  const clearWidth = (key) => {
-    if (!columnWidths || columnWidths[key] == null) return
-    const next = { ...columnWidths }
-    delete next[key]
-    onResizeColumns(Object.keys(next).length ? next : null)
+  // Double-clicking the divider sizes the column to fit what is in it -- the
+  // heading included, and only the rows on screen, because a folded-away group
+  // is not what anyone is looking at.
+  const autoFit = (key) => {
+    const cells = document.querySelectorAll(`.orders [data-col="${key}"]`)
+    if (!cells.length) return
+    let w = 0
+    cells.forEach((c) => { w = Math.max(w, fitWidth(c)) })
+    onResizeColumns({ ...(widthsRef.current || {}),
+      [key]: Math.round(Math.min(COLW_MAX, Math.max(COLW_MIN, w + 2))) })
   }
   const widthOf = (key) => (sizing && sizing.key === key ? sizing.width
     : columnWidths ? columnWidths[key] : undefined)
@@ -1833,7 +1935,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   // us. That is why this is HTML drag and drop rather than the pointer handling
   // the bars use: capturing a pointer here would swallow the click.
   const th = (col) => (
-    <th key={col.key} className={`${col.cls || ''} draghead`
+    <th key={col.key} data-col={col.key} className={`${col.cls || ''} draghead`
       + (dragCol === col.key ? ' dragging' : '')
       + (overCol === col.key && dragCol && dragCol !== col.key ? ' dropinto' : '')}
       style={widthOf(col.key) ? { width: widthOf(col.key) } : undefined}
@@ -1857,8 +1959,8 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
       </button>
       <span className="thgrip" draggable={false}
         onPointerDown={(e) => startResize(e, col.key)}
-        onDoubleClick={() => clearWidth(col.key)}
-        title="Drag to resize this column, double-click to put it back" />
+        onDoubleClick={() => autoFit(col.key)}
+        title="Drag to resize this column, double-click to fit its contents" />
     </th>
   )
 
@@ -1894,7 +1996,8 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     return (
       <Fragment key={j.id}>
       <tr className={p && p.slipping ? 'late' : ''}>
-        {cols.map((c) => c.cell(cell))}
+        {/* the column's name on every cell, so fitting one can find its own */}
+        {cols.map((c) => cloneElement(c.cell(cell), { 'data-col': c.key }))}
       </tr>
   
       {/* The unit's steps, listed under it the way a work order reads:
