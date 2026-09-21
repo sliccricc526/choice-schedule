@@ -104,10 +104,16 @@ export function stepDependsOn(steps, aId, bId) {
 // Earliest start for every step, counted in working days from the station's
 // start, taken as the longest path through what each one waits on. The station
 // is as long as the furthest any step reaches — its critical path.
+//
+// `lag` holds a step back beyond that: the shop knows the paint has to sit two
+// days before the next man can touch it, or simply wants the work later than it
+// strictly could be. `earliest` is where the step could start with no lag, which
+// is what a drag needs in order to work out the lag it is asking for.
 export function stepPlan(steps) {
   const list = steps || []
   const byId = new Map(list.map((s) => [s.id, s]))
   const offset = new Map()
+  const earliest = new Map()
   const state = new Map()            // 1 = being visited, 2 = settled
   let cycle = false
   const visit = (s) => {
@@ -124,13 +130,14 @@ export function stepPlan(steps) {
       at = Math.max(at, visit(n) + Math.max(1, n.days || 1))
     })
     state.set(s.id, 2)
-    offset.set(s.id, at)
-    return at
+    earliest.set(s.id, at)
+    offset.set(s.id, at + Math.max(0, s.lag || 0))
+    return offset.get(s.id)
   }
   list.forEach(visit)
   const length = list.reduce(
     (n, s) => Math.max(n, (offset.get(s.id) || 0) + Math.max(1, s.days || 1)), 0)
-  return { offset, length: Math.max(1, length), cycle }
+  return { offset, earliest, length: Math.max(1, length), cycle }
 }
 
 // Each step's own dates. Steps that overlap in time get overlapping spans --

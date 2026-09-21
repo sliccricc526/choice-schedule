@@ -135,6 +135,12 @@ name, station, days, the dates it runs between, and what it waits for — the wa
 A step's row spans the table rather than lining up with the columns above it, because the Unit
 column is 130px of work-order number and the columns beside it mean something else entirely.
 
+Step bars take the same two gestures the station bars do. **Drag an edge** to change how long a step
+takes. **Drag the middle** to hold it back: a step has no start date of its own, so moving one sets
+its *lag* — the working days it waits beyond whatever it waits on. Dragging left therefore stops at
+the earliest the step could possibly start, which is an honest limit rather than an arbitrary one,
+and dragging right can lengthen the station if the step is on its critical path.
+
 On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
 across their station's block, spread over as many lines as it takes for none to sit on top of
 another — so work that runs side by side is drawn side by side, and the row grows to fit.

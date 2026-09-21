@@ -102,6 +102,10 @@ create table if not exists public.job_steps (
   -- The steps this one waits on, by id, within the same unit and station.
   -- Empty means it can start as soon as the station does.
   needs uuid[] not null default '{}',
+  -- Working days to hold the step back beyond what it waits on: paint has to
+  -- sit before the next man can touch it, or the shop simply wants the work
+  -- later than it strictly could be. Set by dragging the step on the board.
+  lag int not null default 0 check (lag >= 0),
   -- The order they are listed in, which is the shop's, not the database's.
   position int not null default 0,
   created_at timestamptz not null default now()

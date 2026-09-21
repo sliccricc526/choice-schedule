@@ -500,7 +500,7 @@ export default function App() {
       const e = m.get(r.job_id) || { fab: [], paint: [], asm: [] }
       if (e[r.stage]) e[r.stage].push({
         id: r.id, name: r.name || '', days: r.days, done: r.done,
-        position: r.position, needs: r.needs || [],
+        position: r.position, needs: r.needs || [], lag: r.lag || 0,
       })
       m.set(r.job_id, e)
     })
@@ -581,6 +581,49 @@ export default function App() {
       ...(Math.max(1, dur) === job[key] ? {} : { [key]: Math.max(1, dur) }),
     })
   }, [units, scheduled, stepsByJob, cal, pinsEnabled, saveJob])
+
+  // Dragging a step bar, the same two gestures the station bars take. An edge
+  // changes how long the step takes; the middle holds it back.
+  //
+  // A step has no start date of its own — where it sits comes from what it
+  // waits on — so moving one sets its lag: the working days it waits beyond
+  // its prerequisites. Dragging left therefore stops at the earliest the step
+  // could possibly start, which is the honest limit rather than an arbitrary
+  // one, and dragging right can lengthen the station if the step is on its
+  // critical path.
+  const dragStep = useCallback((jobId, stage, stepId, mode, deltaDays) => {
+    const list = (stepsByJob.get(jobId) || {})[stage]
+    const step = list && list.find((x) => x.id === stepId)
+    const sched = scheduled.find((j) => j.id === jobId)
+    if (!step || !sched) return
+    const plan = stepPlan(list)
+    const spans = stepSpans(sched.spans[stage].start, list, cal)
+    const span = spans.find((x) => x.id === stepId)
+    if (!span) return
+
+    if (mode === 'end') {
+      const end = addDays(span.end, deltaDays)
+      const days = workdaysInclusive(span.start, end < span.start ? span.start : end, cal)
+      if (days !== step.days) saveStep(stepId, { days: Math.max(1, days) })
+      return
+    }
+    // Where the drag wants the step to start, as a working-day offset from the
+    // station, and what that means as a wait beyond its prerequisites.
+    const want = addDays(span.start, deltaDays)
+    const from = cal.isWorkday(want) ? strip(want)
+      : deltaDays < 0 ? cal.prevWorkday(want) : cal.nextWorkday(want)
+    const stationStart = sched.spans[stage].start
+    const offset = Math.max(0, cal.workdaysBetween(stationStart, from))
+    const lag = Math.max(0, offset - (plan.earliest.get(stepId) || 0))
+    if (mode === 'start') {
+      // The left edge moves the start and keeps the finish, so it is a resize
+      // as well as a wait.
+      const days = workdaysInclusive(from > span.end ? strip(span.end) : from, span.end, cal)
+      saveStep(stepId, { lag, days: Math.max(1, days) })
+      return
+    }
+    if (lag !== (step.lag || 0)) saveStep(stepId, { lag })
+  }, [stepsByJob, scheduled, cal, saveStep])
 
   // Hand a stage back to the scheduler.
   const releasePin = useCallback((job, key) => {
@@ -1078,6 +1121,7 @@ export default function App() {
               pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
               onDragStage={pinsEnabled ? dragStage : undefined}
               steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
+              onDragStep={stepsEnabled ? dragStep : undefined}
               onToggleOpen={() => setOpenUnits((o) => {
                 const n = new Set(o)
                 if (n.has(j.id)) n.delete(j.id); else n.add(j.id)
@@ -2088,7 +2132,7 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
 function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage,
-  steps, open, onToggleOpen }) {
+  steps, open, onToggleOpen, onDragStep }) {
   const hasSteps = steps && OPS.some((o) => steps[o.key].length)
   // Parallel steps overlap in time, so each station's steps are spread over as
   // many lines as it takes for none of them to sit on top of another, and the
@@ -2110,19 +2154,24 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   const [drag, setDrag] = useState(null)
   const snap = drag ? Math.round(drag.dx / COL) * COL : 0
 
-  const down = (e, key) => {
-    if (!onDragStage || e.button) return
+  const down = (e, key, stepId) => {
+    if (e.button) return
+    if (stepId ? !onDragStep : !onDragStage) return
     const g = e.target.classList
     const mode = g.contains('grip') ? (g.contains('l') ? 'start' : 'end') : 'move'
     e.preventDefault()
+    e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setDrag({ key, mode, x0: e.clientX, dx: 0 })
+    setDrag({ key, stepId, mode, x0: e.clientX, dx: 0 })
   }
   const move = (e) => setDrag((d) => (d ? { ...d, dx: e.clientX - d.x0 } : d))
   const up = () => setDrag((d) => {
     if (d) {
       const n = Math.round(d.dx / COL)
-      if (n !== 0) onDragStage(j.id, d.key, d.mode, n)
+      if (n !== 0) {
+        if (d.stepId) onDragStep(j.id, d.key, d.stepId, d.mode, n)
+        else onDragStage(j.id, d.key, d.mode, n)
+      }
     }
     return null
   })
@@ -2155,7 +2204,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
         {OPS.map((o) => {
           const s = j.spans[o.key]
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
-          const live = drag && drag.key === o.key
+          const live = drag && drag.key === o.key && !drag.stepId
           if (live) {
             if (drag.mode === 'move') x += snap
             else if (drag.mode === 'end') w = Math.max(COL, w + snap)
@@ -2198,17 +2247,31 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             drawn side by side, on their own lines, because that is what the
             station's length is now built from. */}
         {laid.map(({ op, spans, lane }) => spans.map((st) => {
-          const x = dayIndex(st.start) * COL
-          const w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
+          let x = dayIndex(st.start) * COL
+          let w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
+          const liveStep = drag && drag.stepId === st.id
+          if (liveStep) {
+            if (drag.mode === 'move') x += snap
+            else if (drag.mode === 'end') w = Math.max(COL, w + snap)
+            else { const d = Math.min(snap, w - COL); x += d; w -= d }
+          }
           const waits = (st.needs || []).length
           return (
-            <div key={st.id} className={`bar step${st.done ? ' done' : ''}`}
+            <div key={st.id}
+              className={`bar step${st.done ? ' done' : ''}${onDragStep ? ' draggable' : ''}${liveStep ? ' dragging' : ''}`}
+              onPointerDown={onDragStep ? (e) => down(e, op.key, st.id) : undefined}
+              onPointerMove={onDragStep ? move : undefined}
+              onPointerUp={onDragStep ? up : undefined}
+              onPointerCancel={onDragStep ? up : undefined}
               title={`${op.label}: ${st.name || 'unnamed step'} — ${st.days} d, ${fmt(st.start)} – ${fmt(st.end)}`
                 + `, starts on day ${st.offset + 1} of the station`
                 + (waits ? `, after ${waits} other${waits === 1 ? '' : 's'}` : ', with the station')
-                + (st.done ? ' (done)' : '')}
+                + (st.lag ? `, held back ${st.lag} d` : '')
+                + (st.done ? ' (done)' : '')
+                + (onDragStep ? '. Drag to hold it back, drag an edge to change its days.' : '')}
               style={{ left: x + 1, width: w - 3, top: 41 + lane.get(st.id) * 18,
                 background: op.light, borderColor: op.color, color: op.color }}>
+              {onDragStep && <><span className="grip l" /><span className="grip r" /></>}
               <span>{st.name || '—'}</span>
             </div>
           )
@@ -2320,6 +2383,9 @@ function Style() {
     .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .bar.step.done { opacity: .55; }
     .bar.step.done span { text-decoration: line-through; }
+    .bar.step.draggable { cursor: grab; touch-action: none; }
+    .bar.step.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
+    .bar.step .grip { top: -1px; bottom: -1px; }
     /* the only thing that says a unit has steps, so it has to be findable:
        big enough to read at a glance and a target you can hit without aiming */
     .twist { border: 0; background: #EEF0F1; cursor: pointer; font-size: 13px; line-height: 1;
@@ -2340,8 +2406,11 @@ function Style() {
     .bar.plan.pinned { border-width: 2px; }
     .bar.plan.pinned::after { content: ''; position: absolute; left: 3px; top: 50%; margin-top: -2px;
       width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+    /* Sit inside the bar. Overhanging the edge put one bar's right grip on top
+       of the next bar's left grip in the 2px gap between them, so grabbing the
+       end of paint moved the start of assembly instead. */
     .grip { position: absolute; top: -2px; bottom: -2px; width: 7px; cursor: col-resize; }
-    .grip.l { left: -3px; } .grip.r { right: -3px; }
+    .grip.l { left: 0; } .grip.r { right: 0; }
     .bar.plan.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
     .flag.seq { background: #96581F; }
     .pinchipkey { background: #FFF; border: 2px solid #5B6670; box-sizing: border-box; }
