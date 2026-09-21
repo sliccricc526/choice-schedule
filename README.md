@@ -106,6 +106,25 @@ The header counts the month's deliveries and how many of them the projection say
 deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
 read as a broken one.
 
+### Reading the load, and ordering the rows
+
+Two blocks sit under the board, and they answer different questions.
+
+- **Planned load** counts the plan. With **Level to capacity** on it can never exceed a cap, which is
+  the point of levelling — so it reads as a check that the plan fits.
+- **On the floor** counts the projection: where the work actually is and where the rest of it lands.
+  Six trailers in a four-bay fabrication shop shows as a red **6**, because that is what is
+  happening. The heading carries the count of station-days over capacity.
+
+The station cap is edited in the planned rows; the floor rows read it back, since a cap belongs to
+the station rather than to a row.
+
+**Sort rows by** orders the board three ways. *Fabrication start* is the shop's question — what goes
+on next. *Planned delivery date* is what was promised. *Projected delivery date* is when it will
+really land, which is the one that shows the promises slipping out of order. The order is held
+rather than recomputed live, so dragging a bar doesn't make its row leap away; **Re-sort rows**
+applies the current choice again.
+
 ### Moving around the board
 
 Once a real book is loaded the board runs well past the edge of the screen. Grab any empty part of

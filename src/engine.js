@@ -348,6 +348,14 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
     return { start, end: start }
   }
 
+  // A run of working days from `earliest`, taking whatever capacity it needs.
+  const runFrom = (earliest, n) => {
+    const start = cal.isWorkday(earliest) ? strip(earliest) : cal.nextWorkday(earliest)
+    let end = start
+    for (let i = 1; i < n; i++) end = cal.nextWorkday(end)
+    return { start, end }
+  }
+
   const underway = (j) => { const s = j.stage || 'none'; return s !== 'none' && s !== 'done' }
   const ordered = [...jobs].sort((a, b) =>
     (underway(b) - underway(a)) || (a.delivery - b.delivery) || String(a.unit).localeCompare(String(b.unit)))
@@ -358,15 +366,25 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
     const due = cal.onOrBeforeWorkday(job.delivery)
     const spans = {}
     let cursor = today, end = null
-    work.forEach(({ key, days }) => {
+    work.forEach(({ key, days }, i) => {
+      // The station this unit is on right now is running, so its remaining work
+      // starts now. Capacity decides where work that has not begun goes; it
+      // cannot decide where a trailer already in the bay is. Six units in
+      // fabrication against a cap of four is a fact about the shop floor, and
+      // the honest answer is to draw all six starting today — not to push two of
+      // them into next week, which is the one thing that definitely is not
+      // happening. The overload is real and stays visible in the bars
+      // themselves; the load rows under the board count the plan, not the floor.
+      const running = i === 0 && key === job.stage
       // A stage pinned to a date does not begin before it, even where the floor
       // happens to be clear sooner — otherwise the plan says one thing and the
       // projection beside it says another. The station already under way is
       // exempt: it is running, whatever date was once pinned to it.
-      const pin = job.stage === key ? null : pinOf(job, key)
+      const pin = running ? null : pinOf(job, key)
       const earliest = pin && strip(pin) > cursor ? strip(pin) : cursor
-      const blk = forwardBlock(key, days, earliest)
+      const blk = running ? runFrom(earliest, days) : forwardBlock(key, days, earliest)
       spans[key] = blk
+      // Claimed either way, so an overrun station still reports its overload.
       take(key, blk.start, blk.end)
       cursor = cal.nextWorkday(blk.end)
       end = blk.end
