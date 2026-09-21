@@ -2320,8 +2320,13 @@ function Style() {
     .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .bar.step.done { opacity: .55; }
     .bar.step.done span { text-decoration: line-through; }
-    .twist { border: 0; background: none; cursor: pointer; font-size: 10px; color: #5B6670; padding: 0 3px 0 0; line-height: 1; }
-    .twist:hover { color: #1B2126; }
+    /* the only thing that says a unit has steps, so it has to be findable:
+       big enough to read at a glance and a target you can hit without aiming */
+    .twist { border: 0; background: #EEF0F1; cursor: pointer; font-size: 13px; line-height: 1;
+      color: #3A434B; width: 20px; height: 20px; flex: none; border-radius: 4px;
+      display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+    .twist:hover { background: #44688F; color: #FFF; }
+    .twist:focus-visible { outline: 2px solid #44688F; outline-offset: 1px; }
     .cell.we { background: #F5F6F7; }
     .cell.todaycol::after, .lcell.todaycol::after { content: ''; position: absolute; inset: 0; border-left: 2px solid #1B2126; }
     /* two lanes: the plan on top, where the work actually lands beneath it */
@@ -2475,7 +2480,8 @@ function Style() {
        colSpan is ignored, which collapses the whole row into one column. */
     .cellflex { display: flex; align-items: center; gap: 8px; }
     .orders td.unitcell .cellflex > input { flex: 1; min-width: 0; }
-    .twist.gap { width: 13px; display: inline-block; flex: none; }
+    /* keeps a step's name lined up under a unit that has the real thing */
+    .twist.gap { width: 20px; height: 20px; display: inline-block; flex: none; background: none; }
     .orders tr.tstep td { background: #FAFBFC; }
     /* the width:100% on table inputs would stretch every control on this row.
        Matches nested inputs too — the days field sits inside its own box. */
