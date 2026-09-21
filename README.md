@@ -201,8 +201,12 @@ handling the bars use. The order is remembered per browser, and **Reset columns*
 has been changed — which puts both the order and the widths back. The heading and the cells under it
 are one entry in a single list of columns, so they cannot drift apart.
 
-**Table columns resize.** Drag a heading's right edge; double-click that edge to give one column its
-default back. Only the columns somebody actually changed are stored, so the rest follow the defaults
+**Table columns resize.** Drag a heading's right edge; **double-click that edge to fit the column to
+its contents** — the heading included, and only the rows on screen, because a folded-away group is
+not what anyone is looking at. Fitting measures the text rather than the boxes: an input is as wide
+as its CSS says whatever is typed in it, so the browser cannot be asked. Margins, letter-spacing and
+`text-transform` all count — a stage chip holds "Fabrication" and draws FABRICATION, and carries a
+margin from the rule it is built on; a fit that ignored either wraps the chip onto two lines. Only the columns somebody actually changed are stored, so the rest follow the defaults
 as those change. The table lays out `fixed` for this: under the browser's automatic layout a column
 width is only a hint, and the slack goes to whatever has the longest content, so a column dragged
 wider springs part-way back. Description carries no width of its own and takes the remainder. An order saved before a column was switched off, or before a new one
@@ -210,6 +214,12 @@ existed, still loads: what it names keeps its place, and anything it is missing 
 would have been by default.
 
 ### Moving around the board
+
+The board remembers where it was left and returns there, rather than to the left edge — switching to
+the table and back does not mean dragging your way across the year again. What is stored is the date
+at the left edge, not a pixel offset: the run of days shifts whenever a delivery moves, so an offset
+would point at a different week by morning. If that date has since fallen outside the run, the board
+goes to the nearest end of it, which is closer to where you were than January is.
 
 The column of unit names is resizable: drag the seam between it and the calendar. Descriptions are
 one line and clip with an ellipsis, so a shop with long part descriptions can widen it until they
