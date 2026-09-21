@@ -2659,8 +2659,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             the plan above it, filled solid rather than outlined, so the pair
             reads as one station in two states. Colour says which station; how
             late a unit is running is the flag on its label and how far its bars
-            run past the delivery mark. */}
-        {tracking && proj && (underway(j) || proj.slipping) && OPS.map((o) => {
+            run past the delivery mark.
+            Drawn for every unit that still has work, not only the ones running
+            late. A unit that will make its date has a projection too, and it is
+            the one worth seeing: it says which week the work is expected to
+            start, and a row with nothing in this lane reads as a row with no
+            answer rather than as good news. Only a finished unit has no bars
+            here, because it has no work left to land. */}
+        {tracking && proj && OPS.map((o) => {
           const s = proj.spans[o.key]
           if (!s) return null
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
