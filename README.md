@@ -198,8 +198,14 @@ folded, and whether it is open is remembered in the browser like the sort and th
 the drag came from the left, before it if from the right. A click still sorts; the browser tells a
 click and a drag apart, which is why the headings use HTML drag and drop rather than the pointer
 handling the bars use. The order is remembered per browser, and **Reset columns** appears once it
-has been changed. The heading and the cells under it are one entry in a single list of columns, so
-they cannot drift apart. An order saved before a column was switched off, or before a new one
+has been changed — which puts both the order and the widths back. The heading and the cells under it
+are one entry in a single list of columns, so they cannot drift apart.
+
+**Table columns resize.** Drag a heading's right edge; double-click that edge to give one column its
+default back. Only the columns somebody actually changed are stored, so the rest follow the defaults
+as those change. The table lays out `fixed` for this: under the browser's automatic layout a column
+width is only a hint, and the slack goes to whatever has the longest content, so a column dragged
+wider springs part-way back. Description carries no width of its own and takes the remainder. An order saved before a column was switched off, or before a new one
 existed, still loads: what it names keeps its place, and anything it is missing goes back where it
 would have been by default.
 

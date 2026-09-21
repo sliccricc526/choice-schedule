@@ -898,6 +898,22 @@ export default function App() {
       return Array.isArray(v) && v.every((k) => typeof k === 'string') ? v : null
     } catch { return null }
   })
+  // How wide each column is, for the ones that have been dragged. A column
+  // missing from here keeps the width it ships with, so this stays a short list
+  // of what somebody actually changed rather than a copy of every default.
+  const [columnWidths, setColumnWidths] = useState(() => {
+    try {
+      const v = JSON.parse(window.localStorage.getItem('tableWidths'))
+      return v && typeof v === 'object' && !Array.isArray(v) ? v : null
+    } catch { return null }
+  })
+  const resizeColumns = useCallback((widths) => {
+    setColumnWidths(widths)
+    try {
+      if (widths) window.localStorage.setItem('tableWidths', JSON.stringify(widths))
+      else window.localStorage.removeItem('tableWidths')
+    } catch { /* private window */ }
+  }, [])
   const moveColumns = useCallback((order) => {
     setColumnOrder(order)
     try {
@@ -1290,7 +1306,8 @@ export default function App() {
           })}
           onSaveStep={saveStep} onToggleNeed={toggleNeed}
           showDone={showDone} onToggleDone={toggleDone}
-          columnOrder={columnOrder} onMoveColumns={moveColumns} />
+          columnOrder={columnOrder} onMoveColumns={moveColumns}
+          columnWidths={columnWidths} onResizeColumns={resizeColumns} />
       ) : view === 'calendar' ? (
         <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
           today={today} tracking={trackingEnabled} selected={selected}
@@ -1592,11 +1609,18 @@ function SignIn() {
 
 function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
-  showDone, onToggleDone, columnOrder, onMoveColumns }) {
+  showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns }) {
   // Which column is being dragged, and which one the pointer is over. Transient
   // -- where the columns end up is the caller's to keep.
   const [dragCol, setDragCol] = useState(null)
   const [overCol, setOverCol] = useState(null)
+  // The width a column is being dragged to, live. Committed on release, so a
+  // resize is one write rather than one per pixel.
+  const [sizing, setSizing] = useState(null)
+  // A pointer down on a resize grip must not also start a column drag. The
+  // check happens inside dragstart, which is why it is a ref: a state flag set
+  // in pointerdown might not have re-rendered by then.
+  const resizingRef = useRef(false)
   // Hooks first, then the empty case: a return above them would make the hook
   // calls conditional the moment the last unit is deleted.
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
@@ -1745,6 +1769,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     return out
   })()
   const moved = cols.some((c, n) => c.key !== defs[n].key)
+    || Boolean(columnWidths && Object.keys(columnWidths).length)
 
   // Dropping on a column puts the dragged one in its place: after it when the
   // drag came from the left, before it when it came from the right -- which is
@@ -1763,6 +1788,45 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     setOverCol(null)
   }
 
+  // Dragging a column's right edge sets its width. Window listeners rather than
+  // a captured pointer: capturing redirects the click that follows to the
+  // capturing element, which is how the board once lost its day toggles.
+  const COLW_MIN = 56, COLW_MAX = 640
+  const widthAt = (start, x0, x) => Math.round(Math.min(COLW_MAX, Math.max(COLW_MIN, start + x - x0)))
+  const startResize = (e, key) => {
+    if (e.button) return
+    e.preventDefault()
+    e.stopPropagation()
+    resizingRef.current = true
+    const start = e.currentTarget.parentElement.getBoundingClientRect().width
+    const x0 = e.clientX
+    const move = (ev) => setSizing({ key, width: widthAt(start, x0, ev.clientX) })
+    const up = (ev) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      resizingRef.current = false
+      setSizing(null)
+      // Worked out from the pointer again rather than read back out of state,
+      // which on the last move may not have rendered yet.
+      const width = widthAt(start, x0, ev.clientX)
+      // A click on the grip that moved nothing is not a resize. Recording it
+      // would pin the column at its default and light up Reset columns for a
+      // change nobody made.
+      if (width !== Math.round(start)) onResizeColumns({ ...(columnWidths || {}), [key]: width })
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  // Double-clicking the grip gives that one column its default back.
+  const clearWidth = (key) => {
+    if (!columnWidths || columnWidths[key] == null) return
+    const next = { ...columnWidths }
+    delete next[key]
+    onResizeColumns(Object.keys(next).length ? next : null)
+  }
+  const widthOf = (key) => (sizing && sizing.key === key ? sizing.width
+    : columnWidths ? columnWidths[key] : undefined)
+
   // Every column sorts, and every column moves. The arrow marks the one sorted
   // and which way; dragging the heading puts the column somewhere else. A click
   // still sorts -- a drag is a drag, and the browser tells the two apart for
@@ -1772,8 +1836,10 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     <th key={col.key} className={`${col.cls || ''} draghead`
       + (dragCol === col.key ? ' dragging' : '')
       + (overCol === col.key && dragCol && dragCol !== col.key ? ' dropinto' : '')}
+      style={widthOf(col.key) ? { width: widthOf(col.key) } : undefined}
       draggable
       onDragStart={(e) => {
+        if (resizingRef.current) { e.preventDefault(); return }
         e.dataTransfer.effectAllowed = 'move'
         // Firefox starts no drag at all unless the transfer carries something.
         e.dataTransfer.setData('text/plain', col.key)
@@ -1789,6 +1855,10 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
         aria-sort={sort.key === col.key ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>
         {col.label}<span className="arrow">{sort.key === col.key ? (sort.dir > 0 ? '▲' : '▼') : ''}</span>
       </button>
+      <span className="thgrip" draggable={false}
+        onPointerDown={(e) => startResize(e, col.key)}
+        onDoubleClick={() => clearWidth(col.key)}
+        title="Drag to resize this column, double-click to put it back" />
     </th>
   )
 
@@ -1881,13 +1951,14 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   return (
     <div className="tablewrap">
       <div className="tablehint">
-        <span>Click a column to sort, or drag its heading to move it. Enter a target date and
-          press <kbd>Enter</kbd> to drop to the next one — rows hold their place while you type.</span>
+        <span>Click a column to sort, drag its heading to move it, drag its right edge to resize it.
+          Enter a target date and press <kbd>Enter</kbd> to drop to the next one — rows hold their
+          place while you type.</span>
         <button className="btn sm" onClick={onResort} title="Apply the current sort again">Re-sort</button>
         {/* only worth offering once the order has actually been changed */}
         {moved && (
-          <button className="btn sm" onClick={() => onMoveColumns(null)}
-            title="Put the columns back in their original order">Reset columns</button>
+          <button className="btn sm" onClick={() => { onMoveColumns(null); onResizeColumns(null) }}
+            title="Put the columns back in their original order and width">Reset columns</button>
         )}
       </div>
       <table className="orders">
@@ -2880,7 +2951,14 @@ function Style() {
     .secthead.grouphead .twist { font-size: 13px; }
     /* a heading you can pick up and move. The grab cursor is the only thing
        that says so, so it is on the whole cell rather than on a handle. */
-    .orders th.draghead { cursor: grab; user-select: none; }
+    .orders th.draghead { cursor: grab; user-select: none; position: relative; }
+    /* the resize grip, kept inside its own heading: overhanging the edge would
+       put it on top of the next column's, and the wrong one would answer */
+    .orders th .thgrip { position: absolute; top: 0; bottom: 0; right: 0; width: 7px;
+      cursor: col-resize; z-index: 3; }
+    .orders th .thgrip::after { content: ''; position: absolute; inset: 5px 3px;
+      background: #44688F; opacity: 0; transition: opacity .12s; }
+    .orders th .thgrip:hover::after, .orders th .thgrip:active::after { opacity: 1; }
     .orders th.draghead.dragging { opacity: .45; cursor: grabbing; }
     /* where it would land, marked on the column being dropped onto */
     .orders th.draghead.dropinto { background: #EDF2F6; box-shadow: inset 0 -3px 0 #44688F; }
@@ -2925,7 +3003,11 @@ function Style() {
     .tablewrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; }
     .tablehint { font-size: 11px; color: #7A848C; padding: 9px 12px 2px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
     .tablehint kbd { font-family: inherit; font-size: 10px; background: #EEF0F1; border: 1px solid #D4D9DC; border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; }
-    .orders { border-collapse: collapse; width: 100%; font-size: 13px; }
+    /* fixed: under auto layout the browser treats a column width as a hint and
+       hands the slack back to whatever has the longest content, so a column
+       dragged wider springs part-way back. Description carries no width of its
+       own and so takes up the remainder. */
+    .orders { border-collapse: collapse; width: 100%; font-size: 13px; table-layout: fixed; }
     .orders th { text-align: left; font-size: 11px; font-weight: 600; color: #7A848C; padding: 9px 10px; border-bottom: 1px solid #D4D9DC; white-space: nowrap; background: #F6F8F9; }
     .orders td { padding: 4px 6px; border-bottom: 1px solid #E4E8EA; }
     .orders tr:last-child td { border-bottom: 0; }
