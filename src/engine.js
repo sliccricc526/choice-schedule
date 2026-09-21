@@ -75,6 +75,100 @@ export function createCalendar(overrides) {
 // Weekends off, no closures — used when no calendar is supplied.
 export const defaultCalendar = createCalendar()
 
+// --- Steps within a station ------------------------------------------------
+// The pieces a station's work breaks into for one unit. A station with steps
+// takes exactly as long as its steps add up to, which is what lets the steps be
+// laid out inside its block with no rounding and no gap left over.
+
+// Steps within a station do not necessarily run one after another. Two welders
+// on different subassemblies work side by side, and a station takes as long as
+// its longest chain of work, not as long as its steps add up to. Each step
+// names what must finish before it can start; the rest follows from that.
+
+// Does `a` wait, directly or through others, on `b`? Used to refuse a link that
+// would have a step waiting on itself.
+export function stepDependsOn(steps, aId, bId) {
+  const byId = new Map((steps || []).map((s) => [s.id, s]))
+  const seen = new Set()
+  const walk = (id) => {
+    if (id === bId) return true
+    if (seen.has(id)) return false
+    seen.add(id)
+    const s = byId.get(id)
+    return Boolean(s && (s.needs || []).some(walk))
+  }
+  const a = byId.get(aId)
+  return Boolean(a && (a.needs || []).some(walk))
+}
+
+// Earliest start for every step, counted in working days from the station's
+// start, taken as the longest path through what each one waits on. The station
+// is as long as the furthest any step reaches — its critical path.
+//
+// `lag` holds a step back beyond that: the shop knows the paint has to sit two
+// days before the next man can touch it, or simply wants the work later than it
+// strictly could be. `earliest` is where the step could start with no lag, which
+// is what a drag needs in order to work out the lag it is asking for.
+export function stepPlan(steps) {
+  const list = steps || []
+  const byId = new Map(list.map((s) => [s.id, s]))
+  const offset = new Map()
+  const earliest = new Map()
+  const state = new Map()            // 1 = being visited, 2 = settled
+  let cycle = false
+  const visit = (s) => {
+    if (state.get(s.id) === 2) return offset.get(s.id)
+    // A step reached while it is still being visited is waiting on itself.
+    // Say so and treat the link as absent rather than recurring forever.
+    if (state.get(s.id) === 1) { cycle = true; return 0 }
+    state.set(s.id, 1)
+    let at = 0
+    ;(s.needs || []).forEach((id) => {
+      const n = byId.get(id)
+      // A link to a step that has since been deleted is simply no link.
+      if (!n) return
+      at = Math.max(at, visit(n) + Math.max(1, n.days || 1))
+    })
+    state.set(s.id, 2)
+    earliest.set(s.id, at)
+    offset.set(s.id, at + Math.max(0, s.lag || 0))
+    return offset.get(s.id)
+  }
+  list.forEach(visit)
+  const length = list.reduce(
+    (n, s) => Math.max(n, (offset.get(s.id) || 0) + Math.max(1, s.days || 1)), 0)
+  return { offset, earliest, length: Math.max(1, length), cycle }
+}
+
+// Each step's own dates. Steps that overlap in time get overlapping spans --
+// that is the point -- so the board draws them on separate lines.
+export function stepSpans(start, steps, cal = defaultCalendar) {
+  const plan = stepPlan(steps)
+  const base = cal.isWorkday(start) ? strip(start) : cal.nextWorkday(start)
+  const days = [base]
+  for (let i = 1; i < plan.length; i++) days.push(cal.nextWorkday(days[i - 1]))
+  const at = (i) => days[Math.max(0, Math.min(days.length - 1, i))]
+  return (steps || []).map((s) => {
+    const o = plan.offset.get(s.id) || 0
+    return { ...s, offset: o, start: at(o), end: at(o + Math.max(1, s.days || 1) - 1) }
+  })
+}
+
+// Lanes for drawing: the first line on which a step does not overlap something
+// already there, so parallel work stacks instead of sitting on top of itself.
+export function stepLanes(spans) {
+  const lanes = []
+  const out = new Map()
+  ;[...spans].sort((a, b) => a.offset - b.offset || a.position - b.position).forEach((s) => {
+    const end = s.offset + Math.max(1, s.days || 1) - 1
+    let i = lanes.findIndex((lastEnd) => lastEnd < s.offset)
+    if (i === -1) i = lanes.length
+    lanes[i] = end
+    out.set(s.id, i)
+  })
+  return { lane: out, count: Math.max(1, lanes.length) }
+}
+
 // --- Pinned stages ---------------------------------------------------------
 // A stage the shop has placed by hand, by dragging it on the board. The
 // scheduler stops choosing dates for that stage and works the rest of the unit

@@ -85,6 +85,33 @@ update public.stage_log set finished_on = closed_on where finished_on is null;
 -- counted as zero.
 alter table public.stage_log alter column actual_days drop not null;
 
+-- The steps that make up a station's work on one unit: "cut rails", "weld deck",
+-- "install king pin". Steps do not necessarily run one after another -- two
+-- welders on different subassemblies work side by side -- so each one names
+-- what must finish before it can start, and the station takes as long as the
+-- longest chain through them. A station with steps has its day count built
+-- rather than typed; a station with no steps keeps its own number, which is
+-- how every unit starts.
+create table if not exists public.job_steps (
+  id uuid primary key default gen_random_uuid(),
+  job_id uuid not null references public.jobs(id) on delete cascade,
+  stage text not null check (stage in ('fab','paint','asm')),
+  name text not null default '',
+  days int not null default 1 check (days >= 1),
+  done boolean not null default false,
+  -- The steps this one waits on, by id, within the same unit and station.
+  -- Empty means it can start as soon as the station does.
+  needs uuid[] not null default '{}',
+  -- Working days to hold the step back beyond what it waits on: paint has to
+  -- sit before the next man can touch it, or the shop simply wants the work
+  -- later than it strictly could be. Set by dragging the step on the board.
+  lag int not null default 0 check (lag >= 0),
+  -- The order they are listed in, which is the shop's, not the database's.
+  position int not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists job_steps_job_stage on public.job_steps (job_id, stage, position);
+
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
 -- overtime. Days with no row follow the default, so this table stays small.
@@ -112,6 +139,7 @@ alter table public.station_caps enable row level security;
 alter table public.day_overrides enable row level security;
 alter table public.part_numbers enable row level security;
 alter table public.stage_log enable row level security;
+alter table public.job_steps enable row level security;
 
 create policy "jobs team access" on public.jobs
   for all to authenticated using (true) with check (true);
@@ -123,6 +151,8 @@ create policy "parts team access" on public.part_numbers
   for all to authenticated using (true) with check (true);
 create policy "stage log team access" on public.stage_log
   for all to authenticated using (true) with check (true);
+create policy "job steps team access" on public.job_steps
+  for all to authenticated using (true) with check (true);
 
 -- Live sync between users: publish changes over realtime.
 alter publication supabase_realtime add table public.jobs;
@@ -132,6 +162,7 @@ alter publication supabase_realtime add table public.part_numbers;
 -- Without this a station closed on one screen leaves the report stale on every
 -- other one until the page is reloaded.
 alter publication supabase_realtime add table public.stage_log;
+alter publication supabase_realtime add table public.job_steps;
 
 -- Optional starter data (delete these rows once real units are in):
 insert into public.jobs (unit, description, delivery_date, fab_days, paint_days, asm_days) values

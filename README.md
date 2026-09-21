@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog, production tracking or pinned stages existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages or step lists existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -24,7 +24,15 @@ The same goes for the `alter table public.stage_log` block that adds `started_on
 npm install
 cp .env.example .env    # paste your URL + anon key into .env
 npm run dev
+npm run lint            # before pushing
 ```
+
+`npm run lint` is worth running because `npm run build` is not a check. Vite compiles a component
+that throws on its first render perfectly happily — the one that has bitten this file repeatedly is a
+hook's dependency array naming something declared further down, which blanks the whole page with
+*Cannot access X before initialization*. `no-use-before-define` catches it; the build never will.
+`react-hooks/exhaustive-deps` is an error too, since a stale dependency gives a handler that quietly
+acts on old state, which reads as a race rather than as the bug it is.
 
 ### 3. Deploy (Vercel — same flow as your other projects)
 1. Push this folder to a GitHub repo.
@@ -106,6 +114,60 @@ The header counts the month's deliveries and how many of them the projection say
 deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
 read as a broken one.
 
+### Breaking a station into steps
+
+A unit's fabrication is one number of days until you say what it is made of. In the unit panel, each
+station takes a list of steps — *cut rails*, *weld deck*, *install king pin* — with a day count and
+a tick for done.
+
+**Steps do not have to run one after another.** Two welders on different subassemblies work side by
+side, so each step names what must finish before it can start — a row of *waits for* chips under it
+— and a station takes as long as the **longest chain** through its steps, not as long as they add up
+to. A step waiting for nothing starts with the station.
+
+The difference is not small. Cut rails 2d, build the neck 8d, weld the deck 3d after the rails, king
+pin 1d after the deck: treated as a queue that is 14 days, and the neck pointlessly waits for rails
+it does not need. Planned properly it is 8 — the neck runs the whole time alongside everything else.
+
+Each step shows the working day of the station it starts on, so the effect of a link is visible as
+you make it. A link that would put a step in its own queue is refused rather than accepted and then
+reported as a cycle.
+
+The station's day count stops being typed and starts being built. The typed number is kept
+underneath and comes back the moment the last step is removed, so breaking a station down is never
+destructive — and the first step inherits the whole typed count, so nothing on the board jumps when
+you start.
+
+In the table, a unit with steps gets a ▸ too. Expanded, each step is a row under its unit —
+name, station, days, the dates it runs between, and what it waits for — the way a work order reads.
+A step's row spans the table rather than lining up with the columns above it, because the Unit
+column is 130px of work-order number and the columns beside it mean something else entirely.
+
+The projection — the lower, solid lane — drags too, and what it writes depends on the station:
+
+- **A station not started yet** takes the same two gestures as its plan bar: the middle places it,
+  an edge sets its days.
+- **The station a unit is standing in** is running, so it cannot be moved — its work is happening
+  now, and a bar saying otherwise would be the board disagreeing with the shop floor. Its right edge
+  sets the **days left**, which until now could only be typed in the table or the panel.
+
+Step bars take the same two gestures the station bars do. **Drag an edge** to change how long a step
+takes. **Drag the middle** to hold it back: a step has no start date of its own, so moving one sets
+its *lag* — the working days it waits beyond whatever it waits on. Dragging left therefore stops at
+the earliest the step could possibly start, which is an honest limit rather than an arbitrary one,
+and dragging right can lengthen the station if the step is on its critical path.
+
+On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
+across their station's block, spread over as many lines as it takes for none to sit on top of
+another — so work that runs side by side is drawn side by side, and the row grows to fit.
+
+Two consequences worth knowing:
+
+- A station built from steps **cannot be stretched by dragging its edge**, because its length comes
+  from its steps. Drag the middle to move it as usual; change the steps to change how long it takes.
+- **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
+  time. Days left on a station is still its own figure.
+
 ### Reading the load, and ordering the rows
 
 Two blocks sit under the board, and they answer different questions.
@@ -121,9 +183,9 @@ the station rather than to a row.
 
 **Sort rows by** orders the board three ways. *Fabrication start* is the shop's question — what goes
 on next. *Planned delivery date* is what was promised. *Projected delivery date* is when it will
-really land, which is the one that shows the promises slipping out of order. The order is held
-rather than recomputed live, so dragging a bar doesn't make its row leap away; **Re-sort rows**
-applies the current choice again.
+really land, which is the one that shows the promises slipping out of order. The choice is
+remembered in the browser, like the column width. The order is held rather than recomputed live, so
+dragging a bar doesn't make its row leap away; **Re-sort rows** applies the current choice again.
 
 ### Moving around the board
 
