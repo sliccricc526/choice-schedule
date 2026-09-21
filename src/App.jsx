@@ -10,6 +10,8 @@ const COL = 26
 const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 
+const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
+
 // The stage-log report is time study, not scheduling, and the shop is not using
 // it yet. Closures carry on being recorded either way, so the history is there
 // the day it is wanted — set this to true to put the tab back.
@@ -159,7 +161,15 @@ export default function App() {
     return () => clearTimeout(watchdog)
   }, [session, status])
 
+  // The shop calendar. Several handlers below reach for it, so it is built
+  // before any of them.
+  const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
+
   const userId = session ? session.user.id : null
+  // How many edits are still on their way to the database. Declared up here
+  // because the reload below reads it, and a name used above where it is
+  // defined is the shape of bug this file has produced more than once.
+  const pendingWrites = useRef(0)
   // A realtime event is mostly the echo of our own write. Reloading on each one
   // refetched every table and replaced the board underneath whoever was typing,
   // so the reload is held until the edits have settled.
@@ -194,7 +204,6 @@ export default function App() {
   // refetch. Edits are now applied locally at once and persisted after a pause,
   // and a reload waits until nothing is in flight.
   const SAVE_AFTER = 500
-  const pendingWrites = useRef(0)
   const queuedJobs = useRef(new Map())
   const jobTimers = useRef(new Map())
 
@@ -439,8 +448,6 @@ export default function App() {
       if (e) { setError(e.message); load() }
     }, SAVE_AFTER))
   }, [load])
-
-  const cal = useMemo(() => createCalendar(dayOverrides), [dayOverrides])
 
   // Correct the dates a station actually ran between.
   //
@@ -2175,8 +2182,6 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
     </div>
   )
 }
-
-const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
 function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage,
   steps, open, onToggleOpen, onDragStep, onDragProjected }) {

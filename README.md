@@ -24,7 +24,15 @@ The same goes for the `alter table public.stage_log` block that adds `started_on
 npm install
 cp .env.example .env    # paste your URL + anon key into .env
 npm run dev
+npm run lint            # before pushing
 ```
+
+`npm run lint` is worth running because `npm run build` is not a check. Vite compiles a component
+that throws on its first render perfectly happily — the one that has bitten this file repeatedly is a
+hook's dependency array naming something declared further down, which blanks the whole page with
+*Cannot access X before initialization*. `no-use-before-define` catches it; the build never will.
+`react-hooks/exhaustive-deps` is an error too, since a stale dependency gives a handler that quietly
+acts on old state, which reads as a race rather than as the bug it is.
 
 ### 3. Deploy (Vercel — same flow as your other projects)
 1. Push this folder to a GitHub repo.
