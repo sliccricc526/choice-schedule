@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef, Fragment } from 'react'
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
@@ -1115,7 +1115,14 @@ export default function App() {
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
           projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today}
-          sort={sort} onSort={sortBy} />
+          sort={sort} onSort={sortBy} cal={cal}
+          stepsByJob={stepsEnabled ? stepsByJob : null} openUnits={openUnits}
+          onToggleOpen={(id) => setOpenUnits((o) => {
+            const n = new Set(o)
+            if (n.has(id)) n.delete(id); else n.add(id)
+            return n
+          })}
+          onSaveStep={saveStep} onToggleNeed={toggleNeed} />
       ) : view === 'calendar' ? (
         <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
           today={today} tracking={trackingEnabled} selected={selected}
@@ -1415,8 +1422,11 @@ function SignIn() {
   )
 }
 
-function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking, onAdvance, today, sort, onSort }) {
+function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking,
+  onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed }) {
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
+  // How wide a step's own row has to be to reach the end of the table.
+  const colSpan = 2 + (tracking ? 3 : 0) + 2 + (partsEnabled ? 1 : 0) + 1 + OPS.length
   // Tabbing out of a date crosses every other field before reaching the next
   // one, which is the wrong shape for working down the book. Enter jumps
   // straight to the date below. Arrow keys are left alone — the browser uses
@@ -1483,9 +1493,19 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
             // whole booking instead would call the row untouched.
             const done = planned > 0 ? planned - (j.daysLeft == null ? planned : j.daysLeft) : 0
             const vr = variance(p)
+            const st = stepsByJob ? stepsByJob.get(j.id) : null
+            const hasSteps = Boolean(st && OPS.some((o) => st[o.key].length))
+            const open = Boolean(openUnits && openUnits.has(j.id))
             return (
-              <tr key={j.id} className={p && p.slipping ? 'late' : ''}>
-                <td><input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} /></td>
+              <Fragment key={j.id}>
+              <tr className={p && p.slipping ? 'late' : ''}>
+                <td className="unitcell"><div className="cellflex">
+                  {hasSteps
+                    ? <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
+                        onClick={() => onToggleOpen(j.id)}>{open ? '▾' : '▸'}</button>
+                    : <span className="twist gap" />}
+                  <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
+                </div></td>
                 <td>
                   <input type="date" data-daterow={i} value={isoDate(j.delivery)}
                     onKeyDown={toNextDate}
@@ -1537,13 +1557,68 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                   </td>
                 )}
                 <td><input value={j.desc} onChange={(e) => onSave(j.id, { desc: e.target.value })} /></td>
-                {OPS.map((o) => (
-                  <td key={o.key}>
-                    <input type="number" min="1" value={j[o.key]}
-                      onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />
-                  </td>
-                ))}
+                {OPS.map((o) => {
+                  const built = Boolean(st && st[o.key].length)
+                  return (
+                    <td key={o.key}>
+                      {/* built from steps: the number is the longest chain, not something to type */}
+                      {built
+                        ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
+                        : <input type="number" min="1" value={j[o.key]}
+                            onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
+                    </td>
+                  )
+                })}
               </tr>
+
+              {/* The unit's steps, listed under it the way a work order reads:
+                  what happens, how long it takes, when it runs, what it waits
+                  on. Parallel steps show the same dates as each other, which is
+                  the whole point of them. */}
+              {open && hasSteps && OPS.map((o) => {
+                const list = st[o.key]
+                if (!list.length) return null
+                const spans = stepSpans(j.spans[o.key].start, list, cal)
+                return spans.map((x) => {
+                  const label = (y) => (y.name || `Step ${list.findIndex((z) => z.id === y.id) + 1}`)
+                  return (
+                    <tr key={x.id} className={`tstep${x.done ? ' done' : ''}`}>
+                      {/* One cell across the whole table. The Unit column is
+                          130px of work-order number and a step name needs more
+                          room than that, so the row indents instead of trying
+                          to line up with columns that mean something else. */}
+                      <td colSpan={colSpan} className="stepcell"><div className="cellflex">
+                        <span className="twist gap" />
+                        <input type="checkbox" checked={x.done} title="Done"
+                          onChange={(e) => onSaveStep(x.id, { done: e.target.checked })} />
+                        <input className="stepname-t" value={x.name}
+                          placeholder={`Step ${list.findIndex((z) => z.id === x.id) + 1}`}
+                          onChange={(e) => onSaveStep(x.id, { name: e.target.value })} />
+                        <span className={`chip ${o.key} fixed`}><i />{SHORT[o.key]}</span>
+                        <span className="daysbox">
+                          <input className="stepdays" type="number" min="1" value={x.days} title="Working days"
+                            onChange={(e) => onSaveStep(x.id, { days: Math.max(1, parseInt(e.target.value) || 1) })} />
+                          <span className="dlabel">d</span>
+                        </span>
+                        <span className="tdates">{fmt(x.start)} – {fmt(x.end)}</span>
+                        {list.length > 1 && (
+                          <span className="stepneeds inline">
+                            <span className="nlab">waits for</span>
+                            {list.filter((y) => y.id !== x.id).map((y) => (
+                              <button key={y.id} type="button"
+                                className={`needchip${(x.needs || []).includes(y.id) ? ' on' : ''}`}
+                                title={`${label(x)} waits for ${label(y)}`}
+                                onClick={() => onToggleNeed(list, x, y.id)}>{label(y)}</button>
+                            ))}
+                            {!(x.needs || []).length && <em>nothing</em>}
+                          </span>
+                        )}
+                      </div></td>
+                    </tr>
+                  )
+                })
+              })}
+              </Fragment>
             )
           })}
         </tbody>
@@ -2395,6 +2470,29 @@ function Style() {
       color: #5B6670; border-radius: 3px; padding: 1px 6px; cursor: pointer; }
     .needchip:hover { border-color: #44688F; color: #1B2126; }
     .needchip.on { background: #EDF2F6; border-color: #44688F; color: #33557A; font-weight: 700; }
+    /* steps listed under their unit in the table. The flex goes on a wrapper,
+       never on the <td> itself — a flexed cell stops being a table cell and its
+       colSpan is ignored, which collapses the whole row into one column. */
+    .cellflex { display: flex; align-items: center; gap: 8px; }
+    .orders td.unitcell .cellflex > input { flex: 1; min-width: 0; }
+    .twist.gap { width: 13px; display: inline-block; flex: none; }
+    .orders tr.tstep td { background: #FAFBFC; }
+    /* the width:100% on table inputs would stretch every control on this row.
+       Matches nested inputs too — the days field sits inside its own box. */
+    .orders tr.tstep input { width: auto; flex: none; }
+    .orders tr.tstep input.stepname-t { flex: 1; min-width: 120px; max-width: 320px; }
+    /* beats the width:auto above, which itself beats .stepdays' own width */
+    .orders tr.tstep input.stepdays { width: 44px; text-align: center; }
+    .orders tr.tstep.done input.stepname-t { color: #7A848C; text-decoration: line-through; }
+    .orders td.stepcell { padding-left: 22px; }
+    .orders tr.tstep input[type=checkbox] { accent-color: #3E7C59; width: 14px; height: 14px; cursor: pointer; flex: none; }
+    .orders tr.tstep .chip { flex: none; }
+    /* the station chips differ in width, so pin them so the days line up */
+    .orders tr.tstep .chip.fixed { min-width: 78px; justify-content: center; }
+    .daysbox { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+    .tdates { font-size: 11px; color: #5B6670; font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
+    .stepneeds.inline { padding: 0; }
+    .orders .calc.built { font-variant-numeric: tabular-nums; font-weight: 600; color: #3A434B; }
     .steprow input[type=checkbox] { accent-color: #3E7C59; width: 14px; height: 14px; cursor: pointer; flex: none; }
     .stepname { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; padding: 4px 7px; border: 1px solid #C6CDD1; border-radius: 3px; }
     .stepdays { width: 46px; flex: none; font-family: inherit; font-size: 12px; padding: 4px 5px; border: 1px solid #C6CDD1; border-radius: 3px; text-align: center; }

@@ -130,6 +130,11 @@ underneath and comes back the moment the last step is removed, so breaking a sta
 destructive — and the first step inherits the whole typed count, so nothing on the board jumps when
 you start.
 
+In the table, a unit with steps gets a ▸ too. Expanded, each step is a row under its unit —
+name, station, days, the dates it runs between, and what it waits for — the way a work order reads.
+A step's row spans the table rather than lining up with the columns above it, because the Unit
+column is 130px of work-order number and the columns beside it mean something else entirely.
+
 On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
 across their station's block, spread over as many lines as it takes for none to sit on top of
 another — so work that runs side by side is drawn side by side, and the row grows to fit.
