@@ -1600,7 +1600,7 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
                 <td className="unitcell"><div className="cellflex">
                   {hasSteps
                     ? <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
-                        onClick={() => onToggleOpen(j.id)}>{open ? '▾' : '▸'}</button>
+                        onClick={() => onToggleOpen(j.id)}>{open ? '−' : '+'}</button>
                     : <span className="twist gap" />}
                   <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
                 </div></td>
@@ -2237,7 +2237,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
         <div className="unit">
           {hasSteps && (
             <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
-              onClick={(e) => { e.stopPropagation(); onToggleOpen() }}>{open ? '▾' : '▸'}</button>
+              onClick={(e) => { e.stopPropagation(); onToggleOpen() }}>{open ? '−' : '+'}</button>
           )}
           {j.unit}
           {tracking && proj && proj.slipping && <span className="flag">+{proj.variance}d</span>}
@@ -2467,9 +2467,10 @@ function Style() {
     .bar.step .grip { top: -1px; bottom: -1px; }
     /* the only thing that says a unit has steps, so it has to be findable:
        big enough to read at a glance and a target you can hit without aiming */
-    .twist { border: 0; background: #EEF0F1; cursor: pointer; font-size: 13px; line-height: 1;
-      color: #3A434B; width: 20px; height: 20px; flex: none; border-radius: 4px;
-      display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+    .twist { border: 1px solid #C6CDD1; background: #FFF; cursor: pointer; font-size: 14px;
+      font-weight: 700; line-height: 1; color: #3A434B; width: 20px; height: 20px; flex: none;
+      border-radius: 4px; display: inline-flex; align-items: center; justify-content: center;
+      padding: 0; font-family: inherit; }
     .twist:hover { background: #44688F; color: #FFF; }
     .twist:focus-visible { outline: 2px solid #44688F; outline-offset: 1px; }
     .cell.we { background: #F5F6F7; }
@@ -2633,7 +2634,7 @@ function Style() {
     .cellflex { display: flex; align-items: center; gap: 8px; }
     .orders td.unitcell .cellflex > input { flex: 1; min-width: 0; }
     /* keeps a step's name lined up under a unit that has the real thing */
-    .twist.gap { width: 20px; height: 20px; display: inline-block; flex: none; background: none; }
+    .twist.gap { width: 20px; height: 20px; display: inline-block; flex: none; background: none; border: 0; }
     .orders tr.tstep td { background: #FAFBFC; }
     /* the width:100% on table inputs would stretch every control on this row.
        Matches nested inputs too — the days field sits inside its own box. */
