@@ -187,6 +187,13 @@ really land, which is the one that shows the promises slipping out of order. The
 remembered in the browser, like the column width. The order is held rather than recomputed live, so
 dragging a bar doesn't make its row leap away; **Re-sort rows** applies the current choice again.
 
+**Completed units** are listed together above the live rows rather than mixed through them, under a
+**Complete — n units** bar that folds away, on the board and in the table both. A finished unit is
+still worth keeping — somebody will ask when WO-26-0012 shipped — but a year of them strung through
+the live rows is what makes a board stop being read. Complete is the stage the shop set, not
+something inferred from the dates: a unit is done when someone says it is done. The group starts
+folded, and whether it is open is remembered in the browser like the sort and the column width.
+
 ### Moving around the board
 
 The column of unit names is resizable: drag the seam between it and the calendar. Descriptions are

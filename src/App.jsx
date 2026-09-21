@@ -9,6 +9,12 @@ import {
 const COL = 26
 const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+// The same date, written the way a date field writes it. Anywhere a calculated
+// date sits beside one that is typed in, "Oct 5" next to 09/07/2026 reads as a
+// different kind of value -- a note rather than a date -- so the two columns
+// are spelled the same. The board keeps the short form: there it is a label on
+// a bar, not a figure to compare against the one next to it.
+const fmtNum = (d) => d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
 
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
@@ -867,6 +873,29 @@ export default function App() {
     return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
   }, [scheduled, boardOrder])
 
+  // A finished unit is still worth keeping -- somebody will ask when WO-26-0012
+  // shipped -- but it is not the work in front of you, and a year of them
+  // strung through the live rows is what makes the board hard to read. They get
+  // their own group above the rest, folded away by default. The choice is
+  // remembered per browser like the sort and the column width: re-folding two
+  // years of history every morning is exactly the chore we keep removing.
+  const [showDone, setShowDone] = useState(() => {
+    try { return window.localStorage.getItem('showDone') === '1' } catch { return false }
+  })
+  const toggleDone = useCallback(() => {
+    setShowDone((v) => {
+      try { window.localStorage.setItem('showDone', v ? '0' : '1') } catch { /* private window */ }
+      return !v
+    })
+  }, [])
+  // Complete is the stage the shop set, not something inferred from the dates:
+  // a unit is done when someone says it is done.
+  const [doneRows, liveRows] = useMemo(() => {
+    const d = [], l = []
+    boardRows.forEach((j) => { (j.stage === 'done' ? d : l).push(j) })
+    return [d, l]
+  }, [boardRows])
+
   // How wide the sticky column of unit names is. A shop with long part
   // descriptions wants it wider; the person reading it decides, so it is kept
   // in the browser rather than in the database.
@@ -1085,6 +1114,26 @@ export default function App() {
     </div>
   )
 
+  // One row, rendered for both groups. Defined here rather than beside the
+  // board markup so every value it reaches for is already declared -- a
+  // reference that runs before its const is the bug that has blanked this page
+  // more than once.
+  const boardRow = (j) => (
+    <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
+      pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
+      onDragStage={pinsEnabled ? dragStage : undefined}
+      steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
+      onDragStep={stepsEnabled ? dragStep : undefined}
+      onDragProjected={trackingEnabled ? dragProjected : undefined}
+      onToggleOpen={() => setOpenUnits((o) => {
+        const n = new Set(o)
+        if (n.has(j.id)) n.delete(j.id); else n.add(j.id)
+        return n
+      })}
+      selected={selected === j.id}
+      onSelect={() => setSelected(selected === j.id ? null : j.id)} />
+  )
+
   return (
     <div className="shell">
       <Style />
@@ -1169,21 +1218,22 @@ export default function App() {
             )
           })}
 
-          {boardRows.map((j) => (
-            <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
-              pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
-              onDragStage={pinsEnabled ? dragStage : undefined}
-              steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
-              onDragStep={stepsEnabled ? dragStep : undefined}
-              onDragProjected={trackingEnabled ? dragProjected : undefined}
-              onToggleOpen={() => setOpenUnits((o) => {
-                const n = new Set(o)
-                if (n.has(j.id)) n.delete(j.id); else n.add(j.id)
-                return n
-              })}
-              selected={selected === j.id}
-              onSelect={() => setSelected(selected === j.id ? null : j.id)} />
-          ))}
+          {doneRows.length > 0 && (<>
+            <div className="secthead grouphead">
+              <button className="twist" onClick={toggleDone}
+                title={showDone ? 'Hide completed units' : 'Show completed units'}>
+                {showDone ? '−' : '+'}</button>
+              Complete — {doneRows.length} {doneRows.length === 1 ? 'unit' : 'units'}
+            </div>
+            <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
+          </>)}
+          {(showDone ? doneRows : []).map(boardRow)}
+
+          {doneRows.length > 0 && (<>
+            <div className="secthead">In the shop — {liveRows.length} {liveRows.length === 1 ? 'unit' : 'units'}</div>
+            <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
+          </>)}
+          {liveRows.map(boardRow)}
 
           <div className="secthead">Planned load — units per day</div>
           <div className="sectfill" style={{ gridColumn: `span ${days.length}` }} />
@@ -1220,7 +1270,8 @@ export default function App() {
             if (n.has(id)) n.delete(id); else n.add(id)
             return n
           })}
-          onSaveStep={saveStep} onToggleNeed={toggleNeed} />
+          onSaveStep={saveStep} onToggleNeed={toggleNeed}
+          showDone={showDone} onToggleDone={toggleDone} />
       ) : view === 'calendar' ? (
         <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
           today={today} tracking={trackingEnabled} selected={selected}
@@ -1521,7 +1572,8 @@ function SignIn() {
 }
 
 function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking,
-  onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed }) {
+  onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
+  showDone, onToggleDone }) {
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // How wide a step's own row has to be to reach the end of the table.
   const colSpan = 2 + (tracking ? 3 : 0) + 2 + (partsEnabled ? 1 : 0) + 1 + OPS.length
@@ -1556,6 +1608,157 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
     return { text: 'on target', cls: '' }
   }
 
+  // Finished units are listed together above the live ones rather than mixed
+  // through them, and fold away as a group. The running index carries across
+  // both so Enter still steps from one target date to the next.
+  const doneList = rows.filter((j) => j.stage === 'done')
+  const liveList = rows.filter((j) => j.stage !== 'done')
+  const shown = showDone ? doneList : []
+
+  // One unit's rows -- the work order itself and, when it is open, its
+  // steps. Named rather than inlined so the completed group and the live
+  // group render exactly the same thing.
+  const rowFor = (j, i) => {
+    const p = projById.get(j.id)
+    const live = j.stage || 'none'
+    const planned = live === 'none' || live === 'done' ? 0 : j[live]
+    const over = planned > 0 && p && p.spent > planned
+    // Days already done, taken from what the shop says is left rather
+    // than from the calendar. A unit put on the board part-way through a
+    // station has no start date — the normal case when tracking begins —
+    // but its days-left still says work has happened, and reporting the
+    // whole booking instead would call the row untouched.
+    const done = planned > 0 ? planned - (j.daysLeft == null ? planned : j.daysLeft) : 0
+    const vr = variance(p)
+    const st = stepsByJob ? stepsByJob.get(j.id) : null
+    const hasSteps = Boolean(st && OPS.some((o) => st[o.key].length))
+    const open = Boolean(openUnits && openUnits.has(j.id))
+    return (
+      <Fragment key={j.id}>
+      <tr className={p && p.slipping ? 'late' : ''}>
+        <td className="unitcell"><div className="cellflex">
+          {hasSteps
+            ? <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
+                onClick={() => onToggleOpen(j.id)}>{open ? '−' : '+'}</button>
+            : <span className="twist gap" />}
+          <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
+        </div></td>
+        <td>
+          <input type="date" data-daterow={i} value={isoDate(j.delivery)}
+            onKeyDown={toNextDate}
+            onChange={(e) => e.target.value && onSave(j.id, { delivery: parseDate(e.target.value) })} />
+        </td>
+        {tracking && (
+          <td>
+            <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
+              title={live === 'done' ? 'Complete'
+                : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
+                  + (live !== 'none' && !j.stageStarted ? ' — no start date set, so the days spent are not counted' : '')}>
+              <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
+            </button>
+          </td>
+        )}
+        {tracking && (
+          <td>
+            {planned ? (
+              <div className="since">
+                <input type="date" max={isoDate(today)}
+                  value={j.stageStarted ? isoDate(j.stageStarted) : ''}
+                  title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
+                  onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
+                <span className={`sincedays ${over ? 'bad' : ''}`}>
+                  {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}`
+                    : done > 0 ? `${done} of ${planned} d done · no start date`
+                    : `not started · ${planned} d booked`}
+                </span>
+              </div>
+            ) : <span className="calc">—</span>}
+          </td>
+        )}
+        {tracking && (
+          <td>
+            {planned
+              ? <input type="number" min="0" value={j.daysLeft == null ? planned : j.daysLeft}
+                  onChange={(e) => onSave(j.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
+              : <span className="calc">—</span>}
+          </td>
+        )}
+        <td className="calc">{p && p.projectedEnd ? fmtNum(p.projectedEnd) : '—'}</td>
+        <td className={`calc ${vr.cls}`}>{vr.text}</td>
+        {partsEnabled && (
+          <td>
+            <select value={j.partId || ''} onChange={(e) => onApplyPart(j.id, e.target.value)}>
+              <option value="">—</option>
+              {parts.map((p2) => <option key={p2.id} value={p2.id}>{p2.part_number}</option>)}
+            </select>
+          </td>
+        )}
+        <td><input value={j.desc} onChange={(e) => onSave(j.id, { desc: e.target.value })} /></td>
+        {OPS.map((o) => {
+          const built = Boolean(st && st[o.key].length)
+          return (
+            <td key={o.key}>
+              {/* built from steps: the number is the longest chain, not something to type */}
+              {built
+                ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
+                : <input type="number" min="1" value={j[o.key]}
+                    onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
+            </td>
+          )
+        })}
+      </tr>
+  
+      {/* The unit's steps, listed under it the way a work order reads:
+          what happens, how long it takes, when it runs, what it waits
+          on. Parallel steps show the same dates as each other, which is
+          the whole point of them. */}
+      {open && hasSteps && OPS.map((o) => {
+        const list = st[o.key]
+        if (!list.length) return null
+        const spans = stepSpans(j.spans[o.key].start, list, cal)
+        return spans.map((x) => {
+          const label = (y) => (y.name || `Step ${list.findIndex((z) => z.id === y.id) + 1}`)
+          return (
+            <tr key={x.id} className={`tstep${x.done ? ' done' : ''}`}>
+              {/* One cell across the whole table. The Unit column is
+                  130px of work-order number and a step name needs more
+                  room than that, so the row indents instead of trying
+                  to line up with columns that mean something else. */}
+              <td colSpan={colSpan} className="stepcell"><div className="cellflex">
+                <span className="twist gap" />
+                <input type="checkbox" checked={x.done} title="Done"
+                  onChange={(e) => onSaveStep(x.id, { done: e.target.checked })} />
+                <input className="stepname-t" value={x.name}
+                  placeholder={`Step ${list.findIndex((z) => z.id === x.id) + 1}`}
+                  onChange={(e) => onSaveStep(x.id, { name: e.target.value })} />
+                <span className={`chip ${o.key} fixed`}><i />{SHORT[o.key]}</span>
+                <span className="daysbox">
+                  <input className="stepdays" type="number" min="1" value={x.days} title="Working days"
+                    onChange={(e) => onSaveStep(x.id, { days: Math.max(1, parseInt(e.target.value) || 1) })} />
+                  <span className="dlabel">d</span>
+                </span>
+                <span className="tdates">{fmt(x.start)} – {fmt(x.end)}</span>
+                {list.length > 1 && (
+                  <span className="stepneeds inline">
+                    <span className="nlab">waits for</span>
+                    {list.filter((y) => y.id !== x.id).map((y) => (
+                      <button key={y.id} type="button"
+                        className={`needchip${(x.needs || []).includes(y.id) ? ' on' : ''}`}
+                        title={`${label(x)} waits for ${label(y)}`}
+                        onClick={() => onToggleNeed(list, x, y.id)}>{label(y)}</button>
+                    ))}
+                    {!(x.needs || []).length && <em>nothing</em>}
+                  </span>
+                )}
+              </div></td>
+            </tr>
+          )
+        })
+      })}
+      </Fragment>
+    )
+  }
+
   return (
     <div className="tablewrap">
       <div className="tablehint">
@@ -1579,146 +1782,26 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
           </tr>
         </thead>
         <tbody>
-          {rows.map((j, i) => {
-            const p = projById.get(j.id)
-            const live = j.stage || 'none'
-            const planned = live === 'none' || live === 'done' ? 0 : j[live]
-            const over = planned > 0 && p && p.spent > planned
-            // Days already done, taken from what the shop says is left rather
-            // than from the calendar. A unit put on the board part-way through a
-            // station has no start date — the normal case when tracking begins —
-            // but its days-left still says work has happened, and reporting the
-            // whole booking instead would call the row untouched.
-            const done = planned > 0 ? planned - (j.daysLeft == null ? planned : j.daysLeft) : 0
-            const vr = variance(p)
-            const st = stepsByJob ? stepsByJob.get(j.id) : null
-            const hasSteps = Boolean(st && OPS.some((o) => st[o.key].length))
-            const open = Boolean(openUnits && openUnits.has(j.id))
-            return (
-              <Fragment key={j.id}>
-              <tr className={p && p.slipping ? 'late' : ''}>
-                <td className="unitcell"><div className="cellflex">
-                  {hasSteps
-                    ? <button className="twist" title={open ? 'Hide steps' : 'Show steps'}
-                        onClick={() => onToggleOpen(j.id)}>{open ? '−' : '+'}</button>
-                    : <span className="twist gap" />}
-                  <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
-                </div></td>
-                <td>
-                  <input type="date" data-daterow={i} value={isoDate(j.delivery)}
-                    onKeyDown={toNextDate}
-                    onChange={(e) => e.target.value && onSave(j.id, { delivery: parseDate(e.target.value) })} />
-                </td>
-                {tracking && (
-                  <td>
-                    <button className="stagebtn" onClick={() => onAdvance(j)} disabled={live === 'done'}
-                      title={live === 'done' ? 'Complete'
-                        : `Move ${j.unit} to ${STAGE_LABEL[nextStage(live)]}`
-                          + (live !== 'none' && !j.stageStarted ? ' — no start date set, so the days spent are not counted' : '')}>
-                      <span className={`chip ${live}`}><i />{STAGE_LABEL[live]}</span>
-                    </button>
-                  </td>
-                )}
-                {tracking && (
-                  <td>
-                    {planned ? (
-                      <div className="since">
-                        <input type="date" max={isoDate(today)}
-                          value={j.stageStarted ? isoDate(j.stageStarted) : ''}
-                          title={`When ${j.unit} went into ${STAGE_LABEL[live].toLowerCase()}`}
-                          onChange={(e) => onSave(j.id, { stageStarted: e.target.value ? parseDate(e.target.value) : null })} />
-                        <span className={`sincedays ${over ? 'bad' : ''}`}>
-                          {j.stageStarted ? `${p.spent} of ${planned} d${over ? ' ⚠' : ''}`
-                            : done > 0 ? `${done} of ${planned} d done · no start date`
-                            : `not started · ${planned} d booked`}
-                        </span>
-                      </div>
-                    ) : <span className="calc">—</span>}
-                  </td>
-                )}
-                {tracking && (
-                  <td>
-                    {planned
-                      ? <input type="number" min="0" value={j.daysLeft == null ? planned : j.daysLeft}
-                          onChange={(e) => onSave(j.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
-                      : <span className="calc">—</span>}
-                  </td>
-                )}
-                <td className="calc">{p && p.projectedEnd ? fmt(p.projectedEnd) : '—'}</td>
-                <td className={`calc ${vr.cls}`}>{vr.text}</td>
-                {partsEnabled && (
-                  <td>
-                    <select value={j.partId || ''} onChange={(e) => onApplyPart(j.id, e.target.value)}>
-                      <option value="">—</option>
-                      {parts.map((p2) => <option key={p2.id} value={p2.id}>{p2.part_number}</option>)}
-                    </select>
-                  </td>
-                )}
-                <td><input value={j.desc} onChange={(e) => onSave(j.id, { desc: e.target.value })} /></td>
-                {OPS.map((o) => {
-                  const built = Boolean(st && st[o.key].length)
-                  return (
-                    <td key={o.key}>
-                      {/* built from steps: the number is the longest chain, not something to type */}
-                      {built
-                        ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
-                        : <input type="number" min="1" value={j[o.key]}
-                            onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
-                    </td>
-                  )
-                })}
-              </tr>
-
-              {/* The unit's steps, listed under it the way a work order reads:
-                  what happens, how long it takes, when it runs, what it waits
-                  on. Parallel steps show the same dates as each other, which is
-                  the whole point of them. */}
-              {open && hasSteps && OPS.map((o) => {
-                const list = st[o.key]
-                if (!list.length) return null
-                const spans = stepSpans(j.spans[o.key].start, list, cal)
-                return spans.map((x) => {
-                  const label = (y) => (y.name || `Step ${list.findIndex((z) => z.id === y.id) + 1}`)
-                  return (
-                    <tr key={x.id} className={`tstep${x.done ? ' done' : ''}`}>
-                      {/* One cell across the whole table. The Unit column is
-                          130px of work-order number and a step name needs more
-                          room than that, so the row indents instead of trying
-                          to line up with columns that mean something else. */}
-                      <td colSpan={colSpan} className="stepcell"><div className="cellflex">
-                        <span className="twist gap" />
-                        <input type="checkbox" checked={x.done} title="Done"
-                          onChange={(e) => onSaveStep(x.id, { done: e.target.checked })} />
-                        <input className="stepname-t" value={x.name}
-                          placeholder={`Step ${list.findIndex((z) => z.id === x.id) + 1}`}
-                          onChange={(e) => onSaveStep(x.id, { name: e.target.value })} />
-                        <span className={`chip ${o.key} fixed`}><i />{SHORT[o.key]}</span>
-                        <span className="daysbox">
-                          <input className="stepdays" type="number" min="1" value={x.days} title="Working days"
-                            onChange={(e) => onSaveStep(x.id, { days: Math.max(1, parseInt(e.target.value) || 1) })} />
-                          <span className="dlabel">d</span>
-                        </span>
-                        <span className="tdates">{fmt(x.start)} – {fmt(x.end)}</span>
-                        {list.length > 1 && (
-                          <span className="stepneeds inline">
-                            <span className="nlab">waits for</span>
-                            {list.filter((y) => y.id !== x.id).map((y) => (
-                              <button key={y.id} type="button"
-                                className={`needchip${(x.needs || []).includes(y.id) ? ' on' : ''}`}
-                                title={`${label(x)} waits for ${label(y)}`}
-                                onClick={() => onToggleNeed(list, x, y.id)}>{label(y)}</button>
-                            ))}
-                            {!(x.needs || []).length && <em>nothing</em>}
-                          </span>
-                        )}
-                      </div></td>
-                    </tr>
-                  )
-                })
-              })}
-              </Fragment>
-            )
-          })}
+          {doneList.length > 0 && (
+            <tr className="grouprow">
+              <td colSpan={colSpan}><div className="cellflex">
+                <button className="twist" onClick={onToggleDone}
+                  title={showDone ? 'Hide completed units' : 'Show completed units'}>
+                  {showDone ? '−' : '+'}</button>
+                <span>Complete — {doneList.length} {doneList.length === 1 ? 'unit' : 'units'}</span>
+              </div></td>
+            </tr>
+          )}
+          {shown.map(rowFor)}
+          {doneList.length > 0 && (
+            <tr className="grouprow">
+              <td colSpan={colSpan}><div className="cellflex">
+                <span className="twist gap" />
+                <span>In the shop — {liveList.length} {liveList.length === 1 ? 'unit' : 'units'}</span>
+              </div></td>
+            </tr>
+          )}
+          {liveList.map((j, i) => rowFor(j, i + shown.length))}
         </tbody>
       </table>
     </div>
@@ -1918,7 +2001,7 @@ function CalendarView({ rows, projById, partsById, cal, today, tracking, selecte
 // stands in for it, marked as a projection, because a guess printed as a fact
 // is how a board stops being believed.
 function StageDateTable({ rows, showUnit, showVar, showState, compact, onEdit, logEditable, today }) {
-  const date = (d) => (d ? fmt(d) : <span className="muted">—</span>)
+  const date = (d) => (d ? fmtNum(d) : <span className="muted">—</span>)
   // What can be corrected by hand, and what has to be corrected some other way.
   // A station that hasn't run has no actual dates to give; the one in progress
   // has a start but no finish, because a station finishes by being closed —
@@ -2678,6 +2761,13 @@ function Style() {
     .overtag { margin-left: 7px; font-size: 10px; font-weight: 700; color: #fff; background: #B3382E; border-radius: 3px; padding: 1px 5px; }
     .loadlabel .cap b { font-variant-numeric: tabular-nums; color: #3A434B; }
     .sectfill { background: #F6F8F9; border-top: 2px solid #C6CDD1; }
+    /* the completed group's own head: same bar as the load sections, with the
+       fold control sitting on the baseline of the label rather than above it */
+    .secthead.grouphead { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
+    .secthead.grouphead .twist { font-size: 13px; }
+    /* the same grouping in the table: one bar across every column */
+    .orders tr.grouprow td { background: #F6F8F9; border-top: 2px solid #C6CDD1;
+      font-size: 11px; font-weight: 700; color: #3A434B; padding: 7px 10px; }
     .loadlabel { position: sticky; left: 0; z-index: 2; background: #FFF; border-top: 1px solid #E4E8EA; border-right: 1px solid #D4D9DC; padding: 5px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
     .loadlabel .nm { font-weight: 600; }
     .loadlabel input { font-family: inherit; font-size: 12px; width: 44px; padding: 2px 4px; border: 1px solid #C6CDD1; border-radius: 3px; text-align: center; }
@@ -2727,7 +2817,7 @@ function Style() {
     .orders td.calc { color: #5B6670; white-space: nowrap; padding-left: 10px; }
     .orders td.calc.bad { color: #B3382E; font-weight: 600; }
     .orders .w-unit { width: 130px; } .orders .w-pn { width: 110px; }
-    .orders .w-date { width: 150px; } .orders .w-num { width: 66px; } .orders .w-calc { width: 96px; }
+    .orders .w-date { width: 150px; } .orders .w-num { width: 66px; } .orders .w-calc { width: 110px; }
     .orders .w-num input { text-align: center; }
     .addrow { margin: 0 24px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   `}</style>
