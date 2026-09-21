@@ -639,6 +639,54 @@ export default function App() {
     return [...ordered, ...scheduled.filter((j) => !seen.has(j.id))]
   }, [scheduled, boardOrder])
 
+  // How wide the sticky column of unit names is. A shop with long part
+  // descriptions wants it wider; the person reading it decides, so it is kept
+  // in the browser rather than in the database.
+  const LABEL_MIN = 150, LABEL_MAX = 620
+  const gridRef = useRef(null)
+  const gripRef = useRef(null)
+  const [labelWidth, setLabelWidth] = useState(() => {
+    try {
+      const v = Number(window.localStorage.getItem('boardLabelWidth'))
+      return v ? Math.min(LABEL_MAX, Math.max(LABEL_MIN, v)) : 230
+    } catch { return 230 }
+  })
+  const liveWidth = useRef(labelWidth)
+
+  // Dragging the divider writes straight to the DOM and only commits to state
+  // when the pointer comes up. Re-rendering the board on every pointer move
+  // would repaint a couple of thousand day cells and the drag would stutter.
+  const gripDown = useCallback((e) => {
+    if (e.button) return
+    e.preventDefault()
+    e.stopPropagation()
+    const x0 = e.clientX, w0 = liveWidth.current
+    const cols = gridRef.current ? gridRef.current.style.gridTemplateColumns.replace(/^[^ ]+ /, '') : ''
+    const move = (ev) => {
+      const w = Math.min(LABEL_MAX, Math.max(LABEL_MIN, Math.round(w0 + ev.clientX - x0)))
+      liveWidth.current = w
+      if (gridRef.current) gridRef.current.style.gridTemplateColumns = `${w}px ${cols}`
+      if (gripRef.current) gripRef.current.style.left = `${w - 3}px`
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      setLabelWidth(liveWidth.current)
+      try { window.localStorage.setItem('boardLabelWidth', String(liveWidth.current)) } catch { /* private window */ }
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+  }, [])
+
+  // The divider is positioned against the board's scrolled content, while the
+  // column it sits beside is stuck to the left edge — so it has to be pushed
+  // back by however far the board has been scrolled to stay on the seam.
+  const onBoardScroll = useCallback((e) => {
+    if (gripRef.current) gripRef.current.style.transform = `translateX(${e.currentTarget.scrollLeft}px)`
+  }, [])
+
   // Grab the board itself and pull it around, the way you would a paper
   // schedule on a bench. The bars keep their own gesture — dragging one places
   // a stage — so panning only starts on the board's own background.
@@ -654,7 +702,7 @@ export default function App() {
     // twice as far as the finger moved.
     if (e.pointerType === 'touch') return
     // Anything that already does something when you drag or click it keeps it.
-    if (e.target.closest('.bar, input, button, select, textarea, a, label')) return
+    if (e.target.closest('.bar, .colgrip, input, button, select, textarea, a, label')) return
     pan.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop, moved: false }
     setPanning(true)
   }, [])
@@ -872,8 +920,9 @@ export default function App() {
       </div>
 
       <div ref={boardRef} className={`boardwrap${panning ? ' panning' : ''}`}
-        onPointerDown={panDown}>
-        <div className="grid" style={{ gridTemplateColumns: `230px repeat(${days.length}, ${COL}px)` }}>
+        onPointerDown={panDown} onScroll={onBoardScroll}>
+        <div ref={gridRef} className="grid"
+          style={{ gridTemplateColumns: `${labelWidth}px repeat(${days.length}, ${COL}px)` }}>
           <div className="corner" />
           {months.map((m, i) => <div key={i} className="month" style={{ gridColumn: `span ${m.count}` }}>{m.label}</div>)}
           <div className="corner" />
@@ -919,6 +968,9 @@ export default function App() {
             ))}
           </>)}
         </div>
+        <div ref={gripRef} className="colgrip" style={{ left: labelWidth - 3 }}
+          onPointerDown={gripDown}
+          title="Drag to widen the unit column" />
       </div>
       </>) : view === 'table' ? (
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
@@ -1899,7 +1951,11 @@ function Style() {
     .legend { display: flex; gap: 16px; padding: 0 24px 12px; font-size: 12px; color: #3A434B; align-items: center; flex-wrap: wrap; }
     .chip { width: 14px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
     .todaychip { background: #fff; border: 1px solid #1B2126; width: 3px; height: 12px; }
-    .boardwrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; cursor: grab; }
+    .boardwrap { margin: 0 24px 20px; background: #FFF; border: 1px solid #D4D9DC; border-radius: 6px; overflow-x: auto; cursor: grab; position: relative; }
+    /* the seam between the unit names and the calendar — drag it to read more */
+    .colgrip { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6; cursor: col-resize; }
+    .colgrip::after { content: ''; position: absolute; inset: 0 3px; background: #44688F; opacity: 0; transition: opacity .12s; }
+    .colgrip:hover::after, .colgrip:active::after { opacity: 1; }
     /* while panning the whole board answers to the pointer, inner cursors and all */
     .boardwrap.panning, .boardwrap.panning * { cursor: grabbing !important; user-select: none; }
     .grid { display: grid; }

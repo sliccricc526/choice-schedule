@@ -127,6 +127,12 @@ applies the current choice again.
 
 ### Moving around the board
 
+The column of unit names is resizable: drag the seam between it and the calendar. Descriptions are
+one line and clip with an ellipsis, so a shop with long part descriptions can widen it until they
+read. The width is remembered in the browser, between 150 and 620 pixels — it is how one person
+likes their screen, not something about the shop, so it is not stored with the schedule.
+
+
 Once a real book is loaded the board runs well past the edge of the screen. Grab any empty part of
 it — a cell, the date row, the station load rows — and pull, the way you would a paper schedule
 across a bench.
