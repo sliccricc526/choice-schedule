@@ -3,7 +3,7 @@ import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
-  workdaysInclusive, hasPins, stepDays, stepSpans,
+  workdaysInclusive, hasPins, stepPlan, stepSpans, stepLanes, stepDependsOn,
 } from './engine.js'
 
 const COL = 26
@@ -314,11 +314,33 @@ export default function App() {
     setSteps((ls) => [...ls, data])
   }, [steps])
 
+  // Say that one step waits on another. A link that would put a step in its own
+  // queue is refused rather than accepted and then reported as a cycle.
+  const toggleNeed = useCallback((list, step, needId) => {
+    const has = (step.needs || []).includes(needId)
+    if (!has && (needId === step.id || stepDependsOn(list, needId, step.id))) {
+      setError(`That would have ${step.name || 'this step'} waiting on itself.`)
+      return
+    }
+    const needs = has
+      ? step.needs.filter((x) => x !== needId)
+      : [...(step.needs || []), needId]
+    saveStep(step.id, { needs })
+  }, [saveStep])
+
   const removeStep = useCallback(async (id) => {
-    setSteps((ls) => ls.filter((r) => r.id !== id))
+    // Anything waiting on it stops waiting. The scheduler already ignores a link
+    // to a step that is gone, but leaving the id behind would resurrect the wait
+    // if a new step ever reused it.
+    const orphaned = (steps || []).filter((r) => (r.needs || []).includes(id))
+    setSteps((ls) => ls
+      .filter((r) => r.id !== id)
+      .map((r) => ((r.needs || []).includes(id) ? { ...r, needs: r.needs.filter((x) => x !== id) } : r)))
     const { error: e } = await supabase.from('job_steps').delete().eq('id', id)
-    if (e) { setError(e.message); load() }
-  }, [load])
+    if (e) { setError(e.message); load(); return }
+    await Promise.all(orphaned.map((r) => supabase.from('job_steps')
+      .update({ needs: r.needs.filter((x) => x !== id) }).eq('id', r.id)))
+  }, [steps, load])
 
   // Flush anything still queued if the tab goes away mid-edit.
   useEffect(() => {
@@ -476,16 +498,21 @@ export default function App() {
     const m = new Map()
     ;(steps || []).forEach((r) => {
       const e = m.get(r.job_id) || { fab: [], paint: [], asm: [] }
-      if (e[r.stage]) e[r.stage].push({ id: r.id, name: r.name || '', days: r.days, done: r.done, position: r.position })
+      if (e[r.stage]) e[r.stage].push({
+        id: r.id, name: r.name || '', days: r.days, done: r.done,
+        position: r.position, needs: r.needs || [],
+      })
       m.set(r.job_id, e)
     })
     m.forEach((e) => OPS.forEach((o) => e[o.key].sort((a, b) => a.position - b.position)))
     return m
   }, [steps])
 
-  // A station with steps takes as long as its steps add up to. The typed day
-  // count on the unit stays untouched underneath and comes back the moment the
-  // last step is deleted, so breaking a station down is never destructive.
+  // A station with steps takes as long as the longest chain through them —
+  // work that runs side by side is planned side by side, so the station is its
+  // critical path and not the sum of its parts. The typed day count on the unit
+  // stays untouched underneath and comes back the moment the last step is
+  // deleted, so breaking a station down is never destructive.
   const units = useMemo(() => jobs.map((j) => {
     const st = stepsByJob.get(j.id)
     if (!st) return j
@@ -493,7 +520,7 @@ export default function App() {
     OPS.forEach((o) => {
       if (!st[o.key].length) return
       if (out === j) out = { ...j }
-      out[o.key] = Math.max(1, stepDays(st[o.key]))
+      out[o.key] = stepPlan(st[o.key]).length
     })
     return out
   }), [jobs, stepsByJob])
@@ -704,7 +731,18 @@ export default function App() {
   // What the rows are ordered by. The day fabrication has to start is the
   // shop's question — what to put on next. The two delivery dates are the
   // office's: what is promised when, and when it will really land.
-  const [boardSort, setBoardSort] = useState('start')
+  // Remembered per browser, like the column width: which question you want the
+  // board ordered by is yours, and re-picking it every morning is a chore.
+  const [boardSort, setBoardSort] = useState(() => {
+    try {
+      const v = window.localStorage.getItem('boardSort')
+      return ['start', 'delivery', 'projected'].includes(v) ? v : 'start'
+    } catch { return 'start' }
+  })
+  const pickSort = useCallback((v) => {
+    setBoardSort(v)
+    try { window.localStorage.setItem('boardSort', v) } catch { /* private window */ }
+  }, [])
   const resettleBoard = useCallback(() => {
     const key = (j) => {
       if (boardSort === 'delivery') return +j.delivery
@@ -998,7 +1036,7 @@ export default function App() {
         {pinsEnabled && <div><span className="chip pinchipkey" />Placed by hand</div>}
         <div><span className="chip offchip" />Shop closed</div>
         <label className="sortpick">Sort rows by
-          <select value={boardSort} onChange={(e) => setBoardSort(e.target.value)}>
+          <select value={boardSort} onChange={(e) => pickSort(e.target.value)}>
             <option value="start">Fabrication start</option>
             <option value="delivery">Planned delivery date</option>
             <option value="projected">Projected delivery date</option>
@@ -1128,36 +1166,61 @@ export default function App() {
               <h4>Steps</h4>
               {OPS.map((o) => {
                 const list = selSteps ? selSteps[o.key] : []
+                const plan = stepPlan(list)
                 return (
                   <div className="stepgroup" key={o.key}>
                     <div className="stephead">
                       <span className={`chip ${o.key}`}><i />{o.label}</span>
                       <span className="muted">{list.length
                         ? `${list.filter((x) => x.done).length} of ${list.length} done · ${sel[o.key]} d`
+                          + (plan.length < list.reduce((n, x) => n + x.days, 0) ? ' (longest chain)' : '')
                         : `${sel[o.key]} d, not broken down`}</span>
                       <button className="btn sm" onClick={() => addStep(sel, o.key)}>Add step</button>
                     </div>
-                    {list.map((st) => (
-                      <div className={`steprow${st.done ? ' done' : ''}`} key={st.id}>
-                        <input type="checkbox" checked={st.done} title="Done"
-                          onChange={(e) => saveStep(st.id, { done: e.target.checked })} />
-                        <input className="stepname" value={st.name} placeholder="What happens in this step"
-                          onChange={(e) => saveStep(st.id, { name: e.target.value })} />
-                        <input className="stepdays" type="number" min="1" value={st.days}
-                          title="Working days"
-                          onChange={(e) => saveStep(st.id, { days: Math.max(1, parseInt(e.target.value) || 1) })} />
-                        <span className="dlabel">d</span>
-                        <button className="stepdel" title="Remove this step"
-                          onClick={() => removeStep(st.id)}>×</button>
-                      </div>
-                    ))}
+                    {list.map((st, i) => {
+                      const off = plan.offset.get(st.id) || 0
+                      const label = (x) => (x.name || `Step ${list.indexOf(x) + 1}`)
+                      return (
+                        <div className={`stepitem${st.done ? ' done' : ''}`} key={st.id}>
+                          <div className="steprow">
+                            <input type="checkbox" checked={st.done} title="Done"
+                              onChange={(e) => saveStep(st.id, { done: e.target.checked })} />
+                            <input className="stepname" value={st.name} placeholder={`What happens in step ${i + 1}`}
+                              onChange={(e) => saveStep(st.id, { name: e.target.value })} />
+                            <input className="stepdays" type="number" min="1" value={st.days}
+                              title="Working days"
+                              onChange={(e) => saveStep(st.id, { days: Math.max(1, parseInt(e.target.value) || 1) })} />
+                            <span className="dlabel">d</span>
+                            <span className="stepat" title="Working day of the station this step starts on">
+                              day {off + 1}
+                            </span>
+                            <button className="stepdel" title="Remove this step"
+                              onClick={() => removeStep(st.id)}>×</button>
+                          </div>
+                          {list.length > 1 && (
+                            <div className="stepneeds">
+                              <span className="nlab">waits for</span>
+                              {list.filter((x) => x.id !== st.id).map((x) => (
+                                <button key={x.id} type="button"
+                                  className={`needchip${(st.needs || []).includes(x.id) ? ' on' : ''}`}
+                                  title={`${label(st)} waits for ${label(x)}`}
+                                  onClick={() => toggleNeed(list, st, x.id)}>{label(x)}</button>
+                              ))}
+                              {!(st.needs || []).length && <em>nothing — starts with the station</em>}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 )
               })}
-              <p className="foot">A station with steps takes as long as its steps add up to, so its day
-                count is built rather than typed. The typed number is kept underneath and comes back
-                if every step is removed. Ticking a step marks it done; it does not shorten the
-                station, because the work still took the days it took.</p>
+              <p className="foot">Steps do not have to run one after another. Each says what must
+                finish before it can start, and a station takes as long as the longest chain through
+                them — so work that genuinely happens side by side is planned side by side. A step
+                waiting for nothing starts with the station. The typed day count is kept underneath
+                and comes back if every step is removed, and ticking a step marks it done without
+                shortening the station, because the work still took the days it took.</p>
             </div>
           )}
           {trackingEnabled && (
@@ -1952,6 +2015,19 @@ const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage,
   steps, open, onToggleOpen }) {
   const hasSteps = steps && OPS.some((o) => steps[o.key].length)
+  // Parallel steps overlap in time, so each station's steps are spread over as
+  // many lines as it takes for none of them to sit on top of another, and the
+  // row grows to fit the busiest station.
+  const laid = open && hasSteps
+    ? OPS.map((o) => {
+        const list = steps[o.key]
+        if (!list.length) return null
+        const spans = stepSpans(j.spans[o.key].start, list, cal)
+        return { op: o, spans, ...stepLanes(spans) }
+      }).filter(Boolean)
+    : []
+  const laneCount = laid.reduce((n, l) => Math.max(n, l.count), 0)
+  const rowH = laneCount ? 44 + laneCount * 18 + 4 : 46
   // The drag in progress, held on the row so a pointer move repaints one row
   // rather than the whole board. It is a preview only — nothing is written
   // until the pointer comes up, so a drag can be abandoned by putting the bar
@@ -1996,8 +2072,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
       <div className="rowtrack" style={{ gridColumn: `span ${days.length}` }}>
         <div className="cellrow" style={{ gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
           {days.map((d, i) => (
-            <div key={i}
-              className={`cell${!cal.isWorkday(d) ? ' we' : ''}${d.getTime() === todayT ? ' todaycol' : ''}${open && hasSteps ? ' tall' : ''}`} />
+            <div key={i} style={{ height: rowH }}
+              className={`cell${!cal.isWorkday(d) ? ' we' : ''}${d.getTime() === todayT ? ' todaycol' : ''}`} />
           ))}
         </div>
         {/* upper lane: the plan the unit was sold on — and the lane you drag */}
@@ -2043,26 +2119,25 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`}
             style={{ left: x + 1, width: w - 3, background: o.color }} />
         })}
-        {/* the steps a station breaks into, tiled across its own block. They
-            add up to exactly the station's length, so the last one ends where
-            the station does and there is never a gap or an overhang. */}
-        {open && hasSteps && OPS.map((o) => {
-          const list = steps[o.key]
-          if (!list.length) return null
-          const s = j.spans[o.key]
-          return stepSpans(s.start, list, cal).map((st) => {
-            const x = dayIndex(st.start) * COL
-            const w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
-            return (
-              <div key={st.id} className={`bar step${st.done ? ' done' : ''}`}
-                title={`${o.label}: ${st.name || 'unnamed step'} — ${st.days} d, ${fmt(st.start)} – ${fmt(st.end)}`
-                  + (st.done ? ' (done)' : '')}
-                style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
-                <span>{st.name || '—'}</span>
-              </div>
-            )
-          })
-        })}
+        {/* the steps each station breaks into. Two that run side by side are
+            drawn side by side, on their own lines, because that is what the
+            station's length is now built from. */}
+        {laid.map(({ op, spans, lane }) => spans.map((st) => {
+          const x = dayIndex(st.start) * COL
+          const w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
+          const waits = (st.needs || []).length
+          return (
+            <div key={st.id} className={`bar step${st.done ? ' done' : ''}`}
+              title={`${op.label}: ${st.name || 'unnamed step'} — ${st.days} d, ${fmt(st.start)} – ${fmt(st.end)}`
+                + `, starts on day ${st.offset + 1} of the station`
+                + (waits ? `, after ${waits} other${waits === 1 ? '' : 's'}` : ', with the station')
+                + (st.done ? ' (done)' : '')}
+              style={{ left: x + 1, width: w - 3, top: 41 + lane.get(st.id) * 18,
+                background: op.light, borderColor: op.color, color: op.color }}>
+              <span>{st.name || '—'}</span>
+            </div>
+          )
+        }))}
         <div className="delmark" style={{ left: dayIndex(j.delivery) * COL + COL / 2 }} />
       </div>
     </>
@@ -2164,9 +2239,8 @@ function Style() {
     .rowtrack { position: relative; }
     .cellrow { display: grid; }
     .cell { border-top: 1px solid #E4E8EA; border-left: 1px solid #F0F2F3; height: 46px; position: relative; }
-    .cell.tall { height: 68px; }
-    /* third lane: the steps inside each station */
-    .bar.step { top: 41px; height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
+    /* the step lines under each unit; the lane sets each one's top in the markup */
+    .bar.step { height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
       display: flex; align-items: center; padding: 0 4px; }
     .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .bar.step.done { opacity: .55; }
@@ -2311,7 +2385,16 @@ function Style() {
     .stepgroup:first-of-type { border-top: 0; }
     .stephead { display: flex; align-items: center; gap: 9px; margin-bottom: 5px; }
     .stephead .muted { flex: 1; font-size: 11px; }
+    .stepitem { padding: 3px 0; }
     .steprow { display: flex; align-items: center; gap: 7px; padding: 2px 0 2px 4px; }
+    .stepat { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 40px; }
+    .stepneeds { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px 0 1px 29px; }
+    .stepneeds .nlab, .stepneeds em { font-size: 10px; color: #9AA4AB; font-style: normal; }
+    .needchip { font-family: inherit; font-size: 10px; max-width: 132px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; border: 1px solid #C6CDD1; background: #FFF;
+      color: #5B6670; border-radius: 3px; padding: 1px 6px; cursor: pointer; }
+    .needchip:hover { border-color: #44688F; color: #1B2126; }
+    .needchip.on { background: #EDF2F6; border-color: #44688F; color: #33557A; font-weight: 700; }
     .steprow input[type=checkbox] { accent-color: #3E7C59; width: 14px; height: 14px; cursor: pointer; flex: none; }
     .stepname { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; padding: 4px 7px; border: 1px solid #C6CDD1; border-radius: 3px; }
     .stepdays { width: 46px; flex: none; font-family: inherit; font-size: 12px; padding: 4px 5px; border: 1px solid #C6CDD1; border-radius: 3px; text-align: center; }

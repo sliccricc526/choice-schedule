@@ -86,9 +86,12 @@ update public.stage_log set finished_on = closed_on where finished_on is null;
 alter table public.stage_log alter column actual_days drop not null;
 
 -- The steps that make up a station's work on one unit: "cut rails", "weld deck",
--- "install king pin". A station with steps takes as long as its steps add up to,
--- so the day counts on jobs stop being typed and start being built; a station
--- with no steps keeps using its own number, which is how every unit starts.
+-- "install king pin". Steps do not necessarily run one after another -- two
+-- welders on different subassemblies work side by side -- so each one names
+-- what must finish before it can start, and the station takes as long as the
+-- longest chain through them. A station with steps has its day count built
+-- rather than typed; a station with no steps keeps its own number, which is
+-- how every unit starts.
 create table if not exists public.job_steps (
   id uuid primary key default gen_random_uuid(),
   job_id uuid not null references public.jobs(id) on delete cascade,
@@ -96,7 +99,10 @@ create table if not exists public.job_steps (
   name text not null default '',
   days int not null default 1 check (days >= 1),
   done boolean not null default false,
-  -- Steps run in order, and the order is the shop's, not the database's.
+  -- The steps this one waits on, by id, within the same unit and station.
+  -- Empty means it can start as soon as the station does.
+  needs uuid[] not null default '{}',
+  -- The order they are listed in, which is the shop's, not the database's.
   position int not null default 0,
   created_at timestamptz not null default now()
 );

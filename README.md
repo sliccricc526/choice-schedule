@@ -112,20 +112,32 @@ A unit's fabrication is one number of days until you say what it is made of. In 
 station takes a list of steps — *cut rails*, *weld deck*, *install king pin* — with a day count and
 a tick for done.
 
-**A station with steps takes as long as its steps add up to.** Its day count stops being typed and
-starts being built, which is the point: the schedule comes from real work instead of one estimate.
-The typed number is kept underneath and comes back the moment the last step is removed, so breaking
-a station down is never destructive — and the first step on a station inherits the whole typed
-count, so nothing on the board jumps when you start.
+**Steps do not have to run one after another.** Two welders on different subassemblies work side by
+side, so each step names what must finish before it can start — a row of *waits for* chips under it
+— and a station takes as long as the **longest chain** through its steps, not as long as they add up
+to. A step waiting for nothing starts with the station.
+
+The difference is not small. Cut rails 2d, build the neck 8d, weld the deck 3d after the rails, king
+pin 1d after the deck: treated as a queue that is 14 days, and the neck pointlessly waits for rails
+it does not need. Planned properly it is 8 — the neck runs the whole time alongside everything else.
+
+Each step shows the working day of the station it starts on, so the effect of a link is visible as
+you make it. A link that would put a step in its own queue is refused rather than accepted and then
+reported as a cycle.
+
+The station's day count stops being typed and starts being built. The typed number is kept
+underneath and comes back the moment the last step is removed, so breaking a station down is never
+destructive — and the first step inherits the whole typed count, so nothing on the board jumps when
+you start.
 
 On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
-tiled across their station's block in order, each as wide as its days. They add up to exactly the
-station's length, so the last one ends where the station does — there is never a gap or an overhang.
+across their station's block, spread over as many lines as it takes for none to sit on top of
+another — so work that runs side by side is drawn side by side, and the row grows to fit.
 
 Two consequences worth knowing:
 
-- A station built from steps **cannot be stretched by dragging its edge**, because its length is the
-  sum. Drag the middle to move it as usual; change the steps to change how long it takes.
+- A station built from steps **cannot be stretched by dragging its edge**, because its length comes
+  from its steps. Drag the middle to move it as usual; change the steps to change how long it takes.
 - **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
   time. Days left on a station is still its own figure.
 
@@ -144,9 +156,9 @@ the station rather than to a row.
 
 **Sort rows by** orders the board three ways. *Fabrication start* is the shop's question — what goes
 on next. *Planned delivery date* is what was promised. *Projected delivery date* is when it will
-really land, which is the one that shows the promises slipping out of order. The order is held
-rather than recomputed live, so dragging a bar doesn't make its row leap away; **Re-sort rows**
-applies the current choice again.
+really land, which is the one that shows the promises slipping out of order. The choice is
+remembered in the browser, like the column width. The order is held rather than recomputed live, so
+dragging a bar doesn't make its row leap away; **Re-sort rows** applies the current choice again.
 
 ### Moving around the board
 
