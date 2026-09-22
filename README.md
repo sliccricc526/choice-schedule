@@ -135,6 +135,8 @@ station that ran in June would otherwise borrow a projection reading October. Th
 hidden by default, since the work ahead is what a foreman is being handed; **Include stations
 already finished** puts them back for anyone checking over them.
 
+A **Due** date ringed in red has already gone by with that station still open — the same mark the board puts on the bar, and the one to work from, since *Against plan* will read late on nearly everything while the shop is behind.
+
 Each section has its own **Download CSV**, and **Download all three** puts every station in one
 file with a Station column. The files carry the same columns as the tables plus the unit's
 description in full, they are named for the station and the day they were taken
@@ -309,7 +311,13 @@ removed, or when **Re-sort rows** is clicked.
 
 On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. Every unit with work left shows both lanes, whether or not it is running late: a unit that will make its date still has a projection, and it is the one worth seeing, because it says which week the work is expected to start. Only a finished unit has nothing in the lower lane, having no work left to land.
 
-A **red ring** on a fabrication bar says that station needed to start by now and has not. It appears only while the unit is still standing in front of fabrication — a unit already in paint or assembly started it weeks ago, and ringing that bar would report the shop late on work it has finished. It is measured on fabrication's own planned start, not on whether the unit will make its delivery: that is said by the flag on the label and by bars running past the delivery mark. With **Level to capacity** on there is no overdue start to report, since a levelled plan books nothing before today, so the ring belongs to the unlevelled view.
+A **red ring** on a planned bar says that station's dates have gone by with the work still not done. Any of the three can carry one, independently: a station the unit has not reached yet is ringed once its planned **start** has passed, and the station the unit is standing at now is ringed once its planned **finish** has passed — so a station running inside its own planned window is never ringed, however late the unit as a whole is. Hover a bar for how many working days it is behind.
+
+A station the unit has already passed never rings, whatever its dates say. A unit in assembly finished fabrication weeks ago, and ringing that bar would report the shop late on work it has finished. A badly late unit will ring all three at once, which is the truth: fabrication is still open and paint and assembly should both have begun.
+
+The ring is measured on each station's own planned dates, not on whether the unit will make its delivery — that is said by the flag on the label and by bars running past the delivery mark — and not on where the projection puts the work, which is what the Foremen tab's *Against plan* column shows. The two answer different questions: in a shop running behind, nearly everything is projected past plan, so ringing on that would mark every bar and say nothing. Overdue marks only what there is something to do about today.
+
+With **Level to capacity** on there is nothing overdue to report, since a levelled plan books no work before today, so the rings clear. That is the levelled plan being a fresh plan from today forward, not the problem going away — the Foremen tab always reads the just-in-time plan and keeps its marks either way.
 
 Colour says *which station*, and nothing else. How late a unit is running is the red `+Nd` flag beside its work-order number, and how far its bars run past the ▼ delivery mark.
 

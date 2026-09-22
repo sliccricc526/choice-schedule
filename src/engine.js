@@ -539,6 +539,30 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
 
 export const STAGE_RANK = { none: 0, fab: 1, paint: 2, asm: 3, done: 4 }
 
+// Whether a station's planned dates have gone by with the work still not done,
+// and which end of them: 'start', 'finish', or null for neither.
+//
+// Overdue is not the same question as late. Late compares the projection to the
+// plan, and in a shop running behind it is true of nearly everything, which
+// makes it useless as a mark on a bar -- ring every station and you have said
+// nothing. Overdue asks only whether the planned dates are already in the past
+// with the station still open, so it clears itself the moment that station is
+// closed and every one it marks is something to do today.
+//
+// `state` is the closed/active/pending split stageDates() draws, `plan` that
+// station's planned span, and `todayT` a stripped timestamp -- strip(d).getTime()
+// -- because the board already holds today that way and hands it to every row.
+export const stageOverdue = (state, plan, todayT) => {
+  // A station behind the unit is done, whenever it happened; nothing to say.
+  if (!plan || state === 'closed') return null
+  // One in progress is overdue once its planned finish has gone by; one not yet
+  // begun, once its planned start has. A station running inside its own planned
+  // window is not overdue, however late the unit as a whole may be.
+  const due = state === 'active' ? plan.end : plan.start
+  if (!due) return null
+  return strip(due).getTime() < todayT ? (state === 'active' ? 'finish' : 'start') : null
+}
+
 // `plan` is the unit's planned spans, `log` its closed stations keyed by stage
 // ({ started, finished, plannedDays, actualDays }), `proj` its forward
 // projection. Anything not known comes back null rather than guessed: a
