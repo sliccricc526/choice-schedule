@@ -309,7 +309,7 @@ Dragging changes the day fabrication has to start, which is what the board sorts
 leap around under the pointer. The board holds its order instead, settling when units are added or
 removed, or when **Re-sort rows** is clicked.
 
-On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. Every unit with work left shows both lanes, whether or not it is running late: a unit that will make its date still has a projection, and it is the one worth seeing, because it says which week the work is expected to start. Only a finished unit has nothing in the lower lane, having no work left to land.
+On the board each row carries two lanes: the plan on top, filled solid in the station's colour, and where the remaining work actually lands underneath, the same colour outlined over a pale fill. The plan is stated flatly; what is actually coming is sketched beneath it. A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. Every unit with work left shows both lanes, whether or not it is running late: a unit that will make its date still has a projection, and it is the one worth seeing, because it says which week the work is expected to start. Only a finished unit has nothing in the lower lane, having no work left to land.
 
 A **red ring** on a bar in the lower lane — the projection, where the remaining work actually lands — says that station is behind, for either of two reasons.
 

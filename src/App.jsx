@@ -2961,13 +2961,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                   ? `. 1 step, ${j[o.key]} days — edit it to change the station's length`
                   : `. ${steps[o.key].length} steps add up to ${j[o.key]} days — edit them to change the station's length`) : '')
               + (onDragStage ? '. Drag to move it.' : '')}
-            style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
+            style={{ left: x + 1, width: w - 3, background: o.color, borderColor: o.light, color: o.light }}>
             {onDragStage && !built && <><span className="grip l" /><span className="grip r" /></>}
           </div>
         })}
         {/* lower lane: where the remaining work actually lands. Same colour as
-            the plan above it, filled solid rather than outlined, so the pair
-            reads as one station in two states. Colour says which station; how
+            the plan above it, outlined rather than filled solid, so the pair
+            reads as one station in two states -- the plan stated flatly, what
+            is actually coming sketched under it. Colour says which station; how
             late a unit is running is the flag on its label and how far its bars
             run past the delivery mark.
             Drawn for every unit that still has work, not only the ones running
@@ -3004,7 +3005,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                   : running ? '. Running now — drag the right edge to change the days left'
                   : built ? '. Drag to place it; its length comes from its steps'
                   : '. Drag to place it, drag an edge to change its days')}
-              style={{ left: x + 1, width: w - 3, background: o.color }}>
+              style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
               {onDragProjected && !running && <span className="grip l" />}
               {onDragProjected && !(built && !running) && <span className="grip r" />}
             </div>
@@ -3166,11 +3167,11 @@ function Style() {
     /* two lanes: the plan on top, where the work actually lands beneath it */
     .bar { position: absolute; top: 12px; height: 20px; border-radius: 3px; }
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
-    .bar.proj { top: 24px; height: 13px; }
+    .bar.proj { top: 24px; height: 13px; border: 1px solid; }
     .bar.proj.draggable { cursor: grab; touch-action: none; }
     .bar.proj.draggable.running { cursor: default; }
     .bar.proj.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
-    .bar.proj.draggable:hover .grip { background: #FFF; opacity: .5; border-radius: 2px; }
+    .bar.proj.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
     /* This station is behind: its planned dates have gone by with the work not
        done, or it is tracking past the date the plan set for it. On the
        projection bar, because it is a statement about where the work is going
@@ -3190,7 +3191,7 @@ function Style() {
        end of paint moved the start of assembly instead. */
     .grip { position: absolute; top: -2px; bottom: -2px; width: 7px; cursor: col-resize; }
     .grip.l { left: 0; } .grip.r { right: 0; }
-    .bar.plan.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
+    .bar.plan.draggable:hover .grip { background: currentColor; opacity: .7; border-radius: 2px; }
     .flag.seq { background: #96581F; }
     /* priority reads as a rank, not an alarm, so it borrows the flag's shape
        and none of its red: raised is the board's own blue, lowered is grey */
@@ -3210,7 +3211,7 @@ function Style() {
     .sortpick { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
     .sortpick select { font-family: inherit; font-size: 12px; padding: 3px 5px; border: 1px solid #C6CDD1; border-radius: 4px; background: #FFF; }
     .lanekey { width: 14px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: -2px;
-      background: linear-gradient(#E3EAF2 0 50%, #44688F 50% 100%); border: 1px solid #44688F; }
+      background: linear-gradient(#44688F 0 50%, #E3EAF2 50% 100%); border: 1px solid #44688F; }
     /* stage chips */
     .chip.none, .chip.fab, .chip.paint, .chip.asm, .chip.done {
       display: inline-flex; align-items: center; gap: 5px; width: auto; height: auto; border-radius: 3px;
