@@ -25,6 +25,8 @@ const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 // day overdue read as none at all.
 const overdueText = (which, days) =>
   `should have ${which === 'finish' ? 'finished' : 'started'} ${days} working day${days === 1 ? '' : 's'} ago`
+// The ring's second reason, worded the same way in both places.
+const slipText = (days) => `projected to finish ${days} working day${days === 1 ? '' : 's'} past plan`
 
 // --- CSV -------------------------------------------------------------------
 // A cell is quoted only when it has to be, so the file stays readable opened in
@@ -2398,6 +2400,7 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
           const start = s.actual.start || (done ? null : s.projected && s.projected.start) || null
           const finish = s.actual.finish || (done ? null : s.projected && s.projected.end) || null
           const due = (s.plan && s.plan.end) || null
+          const late = due && finish ? cal.workdaysBetween(due, finish) : null
           return {
             ...s,
             model: model(j),
@@ -2406,17 +2409,22 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
             due,
             start,
             finish,
-            late: due && finish ? cal.workdaysBetween(due, finish) : null,
-            // Marked the same way the board rings a bar, and off the same test:
-            // the planned dates have gone by with the station still open. Not
-            // the `late` above, which is the projection against plan and, in a
-            // shop running behind, true of almost every row.
+            late,
+            // The first of the two reasons a date gets ringed, and the one
+            // the row tint goes on: a planned date has gone by with the station
+            // still open. It is the selective one -- `late` below is true of
+            // almost every row while the shop is behind.
             overdue,
             // Counted back from today to the date that went by, so the wording
             // is the board's word for word.
             behind: overdue
               ? Math.abs(cal.workdaysBetween(todayT, overdue === 'finish' ? s.plan.end : s.plan.start))
               : 0,
+            // The ring's other reason, the same one the board uses: the work is
+            // tracking past its planned finish. Not on a closed station -- that
+            // one's `late` is how it actually went, which is history, not a
+            // warning, and the board has no projection there to ring either.
+            slipping: !done && late > 0,
           }
         })
         // Soonest first: this list is read from the top down.
@@ -2425,7 +2433,7 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
       return {
         op,
         rows,
-        late: rows.filter((r) => r.late > 0).length,
+        late: rows.filter((r) => r.slipping).length,
         over: rows.filter((r) => r.overdue).length,
         now: rows.filter((r) => r.state === 'active').length,
       }
@@ -2512,7 +2520,9 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
                         title={r.overdue === 'finish' ? `Overdue — ${overdueText('finish', r.behind)}` : undefined}>
                         {date(r.due)}</td>
                       <td className="n">{date(r.start)}</td>
-                      <td className="n">{date(r.finish)}</td>
+                      <td className={`n${r.slipping ? ' blown' : ''}`}
+                        title={r.slipping ? `Slipping — ${slipText(r.late)}` : undefined}>
+                        {date(r.finish)}</td>
                       <td className="r n">{delta(r.late)}</td>
                       <td className="muted">{STATE[r.state]}</td>
                       <td className="n">{date(r.delivery)}</td>
@@ -2532,10 +2542,11 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
         is actually tracking, carried forward from what is on the floor today; a station that has
         already run shows the day it went in and the day it was closed instead. Against plan counts
         working days: a unit three days late out of paint is three days late into assembly unless
-        it is pulled back. A Due date ringed in red has already gone by with that station still
-        open — the same mark the board puts on the bar — and it is the one to work from, since
-        against plan will read late on almost everything while the shop is behind. Every date is
-        as of {fmtNum(today)}, and the CSV files carry the same columns as the tables.
+        it is pulled back. A date ringed in red is one the board rings the bar for: a planned date
+        that has gone by with the station still open, or a projected finish landing past it. The
+        row tint is the first of those only — the date that has already blown is the one there is
+        something to do about today. Every date is as of {fmtNum(today)}, and the CSV files carry
+        the same columns as the tables.
       </p>
     </div>
   )
@@ -2908,28 +2919,41 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           }
           const pinned = Boolean(j.pins && j.pins[o.key])
           const built = Boolean(steps && steps[o.key].length)
-          // The red ring says one thing: this station's planned dates have gone
-          // by and the work is still not done. A station the unit has already
-          // passed never rings, however it went -- ringing it would report the
-          // shop late on work it has finished. Measured on the station's own
-          // planned dates, not on whether the unit will make its delivery: the
-          // delivery is said by the flag on the label and by bars running past
-          // the delivery mark.
+          // The red ring says this station is behind, for either of two
+          // reasons. Overdue: its planned dates have gone by with the work
+          // still not done. Slipping: the work is tracking past the date the
+          // plan set for it. A bar can ring for one, the other or both, and the
+          // tooltip says which.
           //
-          // It reads the committed span rather than the dragged geometry above,
-          // so a bar does not flicker its ring mid-gesture.
+          // Neither fires on a station the unit has already passed -- ringing
+          // it would report the shop late on work it has finished, and a
+          // station behind the unit carries no projection to slip. Both are
+          // measured on the station's own planned dates, not on whether the
+          // unit will make its delivery: that is said by the flag on the label
+          // and by bars running past the delivery mark.
+          //
+          // Both read the committed span rather than the dragged geometry
+          // above, so a bar does not flicker its ring mid-gesture.
           const state = rank > i + 1 ? 'closed' : rank === i + 1 ? 'active' : 'pending'
           const overdue = stageOverdue(state, s, todayT)
           const behind = overdue && Math.abs(cal.workdaysBetween(todayT, overdue === 'finish' ? s.end : s.start))
+          // projectSchedule carries a span only for work still to do, so a
+          // closed station, a finished unit and a running station with no days
+          // left all come back undefined here rather than slipping.
+          const pspan = tracking && proj && proj.spans[o.key]
+          const slip = pspan ? cal.workdaysBetween(s.end, pspan.end) : 0
           return <div key={o.key}
-            className={`bar plan${overdue ? ' overdue' : ''}`
+            className={`bar plan${overdue || slip > 0 ? ' behind' : ''}`
               + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
             onPointerDown={onDragStage ? (e) => down(e, 'plan', o.key) : undefined}
             onPointerMove={onDragStage ? move : undefined}
             onPointerUp={onDragStage ? up : undefined}
             onPointerCancel={onDragStage ? up : undefined}
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
-              + (overdue ? ` — ${overdueText(overdue, behind)}` : '')
+              + (overdue || slip > 0
+                ? ` — ${[overdue && overdueText(overdue, behind), slip > 0 && slipText(slip)]
+                    .filter(Boolean).join('; ')}`
+                : '')
               + (pinned ? ' — placed by hand' : '')
               + (built ? (steps[o.key].length === 1
                   ? `. 1 step, ${j[o.key]} days — edit it to change the station's length`
@@ -3146,7 +3170,7 @@ function Style() {
     /* Drawn just inside the bar's own edge. Bars sit 3px apart, so two outward
        2px rings would need 4px and overlap: three ringed stations on one row
        merged into a single long ring and stopped saying which were late. */
-    .bar.overdue { outline: 2px solid #B3382E; outline-offset: -1px; }
+    .bar.behind { outline: 2px solid #B3382E; outline-offset: -1px; }
     /* the plan is the lane you drag: move from the middle, stretch from an edge */
     .bar.plan.draggable { cursor: grab; touch-action: none; }
     .bar.plan.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
