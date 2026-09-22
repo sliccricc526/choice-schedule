@@ -285,6 +285,23 @@ real pan is swallowed — dragging across the date row must not close every day 
 On a touch screen the browser's own scrolling is left alone. It does momentum and rubber-banding
 better than this would, and panning as well would move the board twice as far as the finger.
 
+### Undoing a drag
+
+**<kbd>Ctrl</kbd>+<kbd>Z</kbd>** puts back the last drag on the board — <kbd>Cmd</kbd>+<kbd>Z</kbd>
+on a Mac, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> or <kbd>Ctrl</kbd>+<kbd>Y</kbd> to do
+it again. It goes back as many drags as you care to press it for, and a note beside the legend
+says which one it just undid, since the row may well be scrolled out of sight.
+
+A drag is the one edit on the board with nothing to retype: the bar lands where the pointer let go
+and the dates it had are gone. So every drag — a planned bar, a projection, a step — records what
+it overwrote, and undoing writes those values back down exactly the path the drag used. Every
+other edit is a field you can simply type back, so none of them are on the stack.
+
+Only the values that drag touched are kept, which is what makes this safe on a board several
+people are working at once: undoing a moved bar restores that stage's pin and its day count and
+leaves everything else on the unit as it now stands. The key is ignored while a field has the
+caret, where it belongs to whatever is being typed, and on the other views, which have no drags.
+
 ### Placing a stage by hand
 
 The scheduler picks every date. When it picks wrong — and it will, because it doesn't know the
