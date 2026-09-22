@@ -2,7 +2,8 @@ import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, Fra
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
-  isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
+  isoDate, parseDate, projectSchedule, nextStage, daysSpent, daysToGo, runFromDaysToGo,
+  STAGE_LABEL, STAGE_RANK, stageDates,
   workdaysInclusive, hasPins, stepPlan, stepSpans, stepLanes, stepDependsOn, stageOverdue,
   PRIORITY_DEFAULT, PRIORITY_MAX,
 } from './engine.js'
@@ -902,9 +903,12 @@ export default function App() {
     const days = Math.max(running ? 0 : 1,
       workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
     if (running) {
-      // What is left on the station the unit is standing in.
-      if (days !== (job.daysLeft == null ? job[key] : job.daysLeft)) {
-        saveDrag('job', jobId, { daysLeft: days }, `${job.unit} — days left in ${STAGE_LABEL[key].toLowerCase()}`)
+      // What is left on the station the unit is standing in. Stored as the run
+      // length from the day it started, so the finish stays where it is dropped
+      // instead of walking a day forward every day nobody retypes it.
+      if (days !== daysToGo(job, today, cal)) {
+        saveDrag('job', jobId, { daysLeft: runFromDaysToGo(job, today, days, cal) },
+          `${job.unit} — days left in ${STAGE_LABEL[key].toLowerCase()}`)
       }
       return
     }
@@ -915,7 +919,7 @@ export default function App() {
     if (days !== job[key]) {
       saveDrag('job', jobId, { [key]: days }, `${job.unit} — projected ${STAGE_LABEL[key].toLowerCase()}`)
     }
-  }, [units, projById, stepsByJob, cal, pinsEnabled, saveDrag, projectionMoves])
+  }, [units, projById, stepsByJob, cal, today, pinsEnabled, saveDrag, projectionMoves])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
   // Closed stations by unit, then by station.
@@ -1002,10 +1006,16 @@ export default function App() {
   const sortRef = useRef(sort)
   const projRef = useRef(projById)
   const partsRef = useRef(partsById)
+  // Days left is worked out rather than stored, so sorting on it needs the
+  // calendar and the day it is being asked about.
+  const calRef = useRef(cal)
+  const todayRef = useRef(today)
   scheduledRef.current = scheduled
   sortRef.current = sort
   projRef.current = projById
   partsRef.current = partsById
+  calRef.current = cal
+  todayRef.current = today
 
   const resortTable = useCallback(() => {
     const { key, dir } = sortRef.current
@@ -1018,7 +1028,7 @@ export default function App() {
         case 'stage': return STAGE_RANK[live]
         case 'since': return j.stageStarted ? +j.stageStarted : null
         case 'left': return live === 'none' || live === 'done'
-          ? null : (j.daysLeft == null ? j[live] : j.daysLeft)
+          ? null : daysToGo(j, todayRef.current, calRef.current)
         case 'projected': return p && p.projectedEnd ? +p.projectedEnd : null
         case 'variance': return p && !p.complete ? p.variance : null
         // null rather than '' so an untagged unit sorts to the bottom like every
@@ -1386,7 +1396,7 @@ export default function App() {
   // Days done on the station in progress according to the shop's own days-left,
   // which is known even when nobody recorded the day the station opened.
   const selLive = sel && sel.stage !== 'none' && sel.stage !== 'done' ? sel.stage : null
-  const selDone = selLive ? sel[selLive] - (sel.daysLeft == null ? sel[selLive] : sel.daysLeft) : 0
+  const selDone = selLive ? Math.max(0, sel[selLive] - daysToGo(sel, today, cal)) : 0
   // A unit whose numbers have been tuned away from its part number's standard.
   const selDrift = selPart && (selPart.description !== sel.desc
     || OPS.some((o) => selPart[`${o.key}_days`] !== sel[o.key]))
@@ -1715,8 +1725,11 @@ export default function App() {
                   </div>
                   <div className="field"><span>Days left on {STAGE_LABEL[sel.stage].toLowerCase()}</span>
                     <input className="num" type="number" min="0"
-                      value={sel.daysLeft == null ? sel[sel.stage] : sel.daysLeft}
-                      onChange={(e) => saveJob(sel.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
+                      title="Counts itself down from the day the station started, so it only needs typing when the shop's own estimate changes"
+                      value={daysToGo(sel, today, cal)}
+                      onChange={(e) => saveJob(sel.id, {
+                        daysLeft: runFromDaysToGo(sel, today, Math.max(0, parseInt(e.target.value) || 0), cal),
+                      })} />
                   </div>
                   <div className="stageline">
                     {!sel.stageStarted
@@ -2011,11 +2024,14 @@ function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApp
     },
     tracking && {
       key: 'left', label: 'Left', cls: 'w-num',
-      cell: ({ j, planned }) => (
+      cell: ({ j, planned, left }) => (
         <td key="left">
           {planned
-            ? <input type="number" min="0" value={j.daysLeft == null ? planned : j.daysLeft}
-                onChange={(e) => onSave(j.id, { daysLeft: Math.max(0, parseInt(e.target.value) || 0) })} />
+            ? <input type="number" min="0" value={left}
+                title="Counts itself down from the day the station started, so it only needs typing when the shop's own estimate changes"
+                onChange={(e) => onSave(j.id, {
+                  daysLeft: runFromDaysToGo(j, today, Math.max(0, parseInt(e.target.value) || 0), cal),
+                })} />
             : <span className="calc">—</span>}
         </td>
       ),
@@ -2188,19 +2204,20 @@ function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApp
     const live = j.stage || 'none'
     const planned = live === 'none' || live === 'done' ? 0 : j[live]
     const over = planned > 0 && p && p.spent > planned
-    // Days already done, taken from what the shop says is left rather
-    // than from the calendar. A unit put on the board part-way through a
-    // station has no start date — the normal case when tracking begins —
-    // but its days-left still says work has happened, and reporting the
-    // whole booking instead would call the row untouched.
-    const done = planned > 0 ? planned - (j.daysLeft == null ? planned : j.daysLeft) : 0
+    // Days left counts itself down from the day the station started, so days
+    // done is what is left taken off the booking. A unit put on the board
+    // part-way through a station has no start date — the normal case when
+    // tracking begins — and then there is nothing to count from, so its run
+    // length stands as the days still to go.
+    const left = daysToGo(j, today, cal)
+    const done = planned > 0 ? Math.max(0, planned - left) : 0
     const vr = variance(p)
     const st = stepsByJob ? stepsByJob.get(j.id) : null
     const hasSteps = Boolean(st && OPS.some((o) => st[o.key].length))
     const open = Boolean(openUnits && openUnits.has(j.id))
     // Everything a cell might need, worked out once for the row rather than
     // once per column.
-    const cell = { j, i, p, live, planned, over, done, vr, st, hasSteps, open }
+    const cell = { j, i, p, live, planned, over, done, left, vr, st, hasSteps, open }
     return (
       <Fragment key={j.id}>
       <tr className={p && p.slipping ? 'late' : ''}>

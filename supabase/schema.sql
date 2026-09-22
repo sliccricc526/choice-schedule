@@ -38,10 +38,20 @@ create table if not exists public.part_numbers (
 alter table public.jobs
   add column if not exists part_number_id uuid references public.part_numbers(id) on delete set null;
 
--- Production tracking. `stage` is the station a unit is on now, `days_left` is
--- what the shop says remains on that station, and `stage_started` dates it so
--- days spent can be counted. Everything else -- projected finish, variance --
--- is derived, so nobody types it and nobody can forget to.
+-- Production tracking. `stage` is the station a unit is on now and
+-- `stage_started` is the day it went on.
+--
+-- `days_left` holds how many working days that station RUNS IN TOTAL, counted
+-- from stage_started -- not the days remaining, despite the name, which is kept
+-- so an older deployment reading this table still finds its column. The days
+-- remaining are worked out from the two (see daysToGo in src/engine.js), and
+-- that is the whole point: a remainder is only true on the day it is typed, so
+-- storing one walked every projected finish a day later for every day nobody
+-- went down the book decrementing. A run length does not move, so the finish
+-- holds still and the remainder counts itself down.
+--
+-- Everything else -- projected finish, variance -- is derived, so nobody types
+-- it and nobody can forget to.
 alter table public.jobs
   add column if not exists stage text not null default 'none'
     check (stage in ('none','fab','paint','asm','done')),
