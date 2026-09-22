@@ -3307,7 +3307,13 @@ function Style() {
       border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: #FFF; color: #3A434B; }
     .hint.bad { color: #B3382E; }
     .hint code { background: #E4E8EA; padding: 1px 4px; border-radius: 3px; }
-    .rowlabel { position: sticky; left: 0; background: #FFF; z-index: 2; border-top: 1px solid #E4E8EA; border-right: 1px solid #D4D9DC; padding: 8px 10px; cursor: pointer; }
+    /* The rule between one work order and the next, drawn in two halves: this
+       one across the frozen column and .cell's across the track. Both a step
+       darker than the #E4E8EA elsewhere, so a unit's planned bar and the
+       projection under it read as one row rather than drifting into its
+       neighbours. Not the 2px #C6CDD1 of the section breaks -- that has to
+       stay the stronger mark. */
+    .rowlabel { position: sticky; left: 0; background: #FFF; z-index: 2; border-top: 1px solid #D4D9DC; border-right: 1px solid #D4D9DC; padding: 8px 10px; cursor: pointer; }
     .rowlabel:hover { background: #F6F8F9; }
     .rowlabel.sel { background: #EDF2F6; }
     .unit { font-size: 13px; font-weight: 700; display: flex; gap: 8px; align-items: center; }
@@ -3315,7 +3321,7 @@ function Style() {
     .flag { font-size: 10px; font-weight: 700; color: #fff; background: #B3382E; border-radius: 3px; padding: 1px 5px; white-space: nowrap; }
     .rowtrack { position: relative; }
     .cellrow { display: grid; }
-    .cell { border-top: 1px solid #E4E8EA; border-left: 1px solid #F0F2F3; height: 46px; position: relative; }
+    .cell { border-top: 1px solid #D4D9DC; border-left: 1px solid #F0F2F3; height: 46px; position: relative; }
     /* the step lines under each unit; the lane sets each one's top in the markup */
     .bar.step { height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
       display: flex; align-items: center; padding: 0 4px; }
