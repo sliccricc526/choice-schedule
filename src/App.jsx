@@ -3347,7 +3347,7 @@ function Style() {
     /* Where the month turns over, carried down the whole board rather than
        living in the header strip alone, so October can be found without
        reading the dates. */
-    .dayhead.mstart, .cell.mstart, .lcell.mstart { border-left-color: #D4D9DC; }
+    .dayhead.mstart, .cell.mstart, .lcell.mstart { border-left-color: #C6CDD1; }
     /* two lanes: the plan on top, where the work actually lands beneath it */
     .bar { position: absolute; top: 12px; height: 20px; border-radius: 3px; }
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
