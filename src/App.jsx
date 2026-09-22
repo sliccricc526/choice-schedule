@@ -2638,14 +2638,24 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           }
           const pinned = Boolean(j.pins && j.pins[o.key])
           const built = Boolean(steps && steps[o.key].length)
+          // The red ring says one thing: this needed to start by now and has
+          // not. It belongs on fabrication, the station a unit starts at, and
+          // only while the unit is still standing in front of it -- a unit in
+          // paint or assembly started fabrication weeks ago, and ringing that
+          // bar tells the shop it is late on work it has already finished.
+          // Measured on fabrication's own planned start, not on whether the
+          // unit will make its delivery: the delivery is said by the flag on
+          // the label and by bars running past the delivery mark.
+          const overdue = o.key === 'fab' && j.slack < 0 && (j.stage || 'none') === 'none'
           return <div key={o.key}
-            className={`bar plan${j.late && o.key === 'fab' ? ' latefab' : ''}`
+            className={`bar plan${overdue ? ' latefab' : ''}`
               + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
             onPointerDown={onDragStage ? (e) => down(e, 'plan', o.key) : undefined}
             onPointerMove={onDragStage ? move : undefined}
             onPointerUp={onDragStage ? up : undefined}
             onPointerCancel={onDragStage ? up : undefined}
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
+              + (overdue ? ` — should have started ${Math.abs(j.slack)} working day${Math.abs(j.slack) === 1 ? '' : 's'} ago` : '')
               + (pinned ? ' — placed by hand' : '')
               + (built ? (steps[o.key].length === 1
                   ? `. 1 step, ${j[o.key]} days — edit it to change the station's length`
