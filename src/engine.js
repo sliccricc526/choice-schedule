@@ -543,11 +543,16 @@ export const STAGE_RANK = { none: 0, fab: 1, paint: 2, asm: 3, done: 4 }
 // and which end of them: 'start', 'finish', or null for neither.
 //
 // Overdue is not the same question as late. Late compares the projection to the
-// plan, and in a shop running behind it is true of nearly everything, which
-// makes it useless as a mark on a bar -- ring every station and you have said
-// nothing. Overdue asks only whether the planned dates are already in the past
-// with the station still open, so it clears itself the moment that station is
-// closed and every one it marks is something to do today.
+// plan, and in a shop running behind it is true of nearly everything. Overdue
+// asks only whether the planned dates are already in the past with the station
+// still open, so it clears itself the moment that station is closed and every
+// one it marks is something to do today.
+//
+// The board's ring is the union of the two, by choice: it marks a station that
+// is overdue or slipping or both. This is the selective half of it, and the
+// half the foremen's list tints its rows on. On a book where nearly everything
+// is late, the other half marks nearly every bar -- worth knowing before it is
+// reached for again.
 //
 // `state` is the closed/active/pending split stageDates() draws, `plan` that
 // station's planned span, and `todayT` a stripped timestamp -- strip(d).getTime()

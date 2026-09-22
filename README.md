@@ -311,21 +311,25 @@ removed, or when **Re-sort rows** is clicked.
 
 On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. Every unit with work left shows both lanes, whether or not it is running late: a unit that will make its date still has a projection, and it is the one worth seeing, because it says which week the work is expected to start. Only a finished unit has nothing in the lower lane, having no work left to land.
 
-A **red ring** on a planned bar says that station is behind, for either of two reasons.
+A **red ring** on a bar in the lower lane — the projection, where the remaining work actually lands — says that station is behind, for either of two reasons.
 
 **Overdue** — its planned dates have gone by with the work still not done. A station the unit has not reached yet goes overdue once its planned **start** has passed; the station the unit is standing at now, once its planned **finish** has passed. A station running inside its own planned window is not overdue, however late the unit as a whole is.
 
-**Slipping** — the projection has it finishing later than the plan said, whether or not any of its dates have passed yet. This is the same figure the Foremen tab prints in its *Against plan* column.
+**Slipping** — the projection has it finishing later than the plan said, whether or not any of its dates have passed yet. This is the same figure the Foremen tab prints in its *Against plan* column, so long as **Level to capacity** is off.
+
+The mark sits on the projection rather than on the plan above it because it is a statement about where the work is going, not about the plan. The plan bars stay clean outlines, which keeps them readable on a board where most units are behind, and keeps the heavier border and dot that mark a stage **placed by hand** from being buried under a ring.
 
 Any of the three stations can ring, independently, for one reason or both. Hover a bar to read which, and by how many working days.
 
-A station the unit has already passed never rings, whatever its dates say. A unit in assembly finished fabrication weeks ago, and ringing that bar would report the shop late on work it has finished; it has no projection left to slip either. A finished unit rings nowhere at all.
+A station the unit has already passed has no projection bar, so it cannot ring — which is right: ringing it would report the shop late on work it has finished. A finished unit has no projection bars at all and rings nowhere.
+
+Two consequences of hanging the mark on the projection lane are worth knowing. With production tracking switched off there is no projection lane, so there are no rings. And a station the unit is standing at with **no days left** has no remaining work to project, so it has no bar to carry a ring even if its planned finish has gone by — its unit's other stations still ring.
 
 Neither reason is about whether the unit will make its **delivery** — that is said by the red `+Nd` flag beside the work-order number and by bars running past the ▼ delivery mark. Both are measured against the station's own planned dates.
 
-Be aware what the slipping half costs in a shop that is running behind: where most units are late, most bars ring, and a mark on almost everything is close to no mark at all. The overdue half is the selective one — it names only what there is something to do about today, and it is what the Foremen tab tints its rows on.
+Be aware what the slipping half costs in a shop that is running behind. On the book as it stands, the overdue half alone rings 14 of 45 stations while the union rings 38 — and every overdue station is also slipping, so the overdue half adds no rings at all, only the first clause of a tooltip. A mark on almost everything is close to no mark at all; the selective signal now lives in the tooltip and in the Foremen tab's counts and row tint.
 
-With **Level to capacity** on the overdue half goes quiet, because a levelled plan books no work before today; the exception is a stage pinned by hand to a date already past, which is honoured verbatim. The slipping half does not go quiet — it compares the levelled plan to the projection — so the ring changes meaning with the toggle rather than disappearing. The Foremen tab always reads the just-in-time plan and keeps both marks whichever way the toggle is set.
+**Level to capacity** changes what the ring means rather than clearing it. The overdue half goes quiet, because a levelled plan books no work before today — the exception is a stage pinned by hand to a date already past, which is honoured verbatim. The slipping half keeps going, now comparing the projection against the levelled plan instead of the just-in-time one, and rings 19 of 45. The Foremen tab always reads the just-in-time plan, so its marks and its numbers stand whichever way the toggle is set — which does mean the board and that tab can print the same sentence with different day counts while levelling is on.
 
 Colour says *which station*, and nothing else. How late a unit is running is the red `+Nd` flag beside its work-order number, and how far its bars run past the ▼ delivery mark.
 

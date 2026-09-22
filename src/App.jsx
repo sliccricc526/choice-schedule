@@ -2843,6 +2843,36 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // draws, reached from the unit's stage alone -- the board is never handed the
   // stage log.
   const rank = STAGE_RANK[j.stage || 'none'] || 0
+  // Which stations are behind, and why, worded for the ring's tooltip. Worked
+  // out once for the row rather than inside a bar map, because the mark now
+  // sits on the projection lane while the dates it is measured against are the
+  // plan's, in the lane above.
+  //
+  // Two reasons. Overdue: the planned dates have gone by with the work still
+  // not done. Slipping: the work is tracking past the date the plan set for it.
+  // Neither fires on a station the unit has already passed -- ringing that
+  // would report the shop late on work it has finished. Both read the committed
+  // spans, never the geometry a drag is adjusting, so a bar does not flicker
+  // its ring mid-gesture.
+  const ringReason = {}
+  OPS.forEach((o, i) => {
+    const plan = j.spans[o.key]
+    const state = rank > i + 1 ? 'closed' : rank === i + 1 ? 'active' : 'pending'
+    const overdue = stageOverdue(state, plan, todayT)
+    // projectSchedule carries a span only for work still to do, so a closed
+    // station, a finished unit and a running station with no days left have
+    // nothing here that could be late.
+    const pspan = tracking && proj && proj.spans[o.key]
+    // Compare the dates before counting between them: workdaysBetween walks a
+    // day at a time, and this runs for every bar on every render -- including
+    // every pointermove of a drag, where the gap can be months.
+    const slip = pspan && pspan.end > plan.end ? cal.workdaysBetween(plan.end, pspan.end) : 0
+    ringReason[o.key] = [
+      overdue && overdueText(overdue,
+        Math.abs(cal.workdaysBetween(todayT, overdue === 'finish' ? plan.end : plan.start))),
+      slip > 0 && slipText(slip),
+    ].filter(Boolean).join('; ')
+  })
   // The drag in progress, held on the row so a pointer move repaints one row
   // rather than the whole board. It is a preview only — nothing is written
   // until the pointer comes up, so a drag can be abandoned by putting the bar
@@ -2907,7 +2937,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           ))}
         </div>
         {/* upper lane: the plan the unit was sold on — and the lane you drag */}
-        {OPS.map((o, i) => {
+        {OPS.map((o) => {
           const s = j.spans[o.key]
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
           const live = drag && drag.lane === 'plan' && drag.key === o.key
@@ -2919,41 +2949,13 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           }
           const pinned = Boolean(j.pins && j.pins[o.key])
           const built = Boolean(steps && steps[o.key].length)
-          // The red ring says this station is behind, for either of two
-          // reasons. Overdue: its planned dates have gone by with the work
-          // still not done. Slipping: the work is tracking past the date the
-          // plan set for it. A bar can ring for one, the other or both, and the
-          // tooltip says which.
-          //
-          // Neither fires on a station the unit has already passed -- ringing
-          // it would report the shop late on work it has finished, and a
-          // station behind the unit carries no projection to slip. Both are
-          // measured on the station's own planned dates, not on whether the
-          // unit will make its delivery: that is said by the flag on the label
-          // and by bars running past the delivery mark.
-          //
-          // Both read the committed span rather than the dragged geometry
-          // above, so a bar does not flicker its ring mid-gesture.
-          const state = rank > i + 1 ? 'closed' : rank === i + 1 ? 'active' : 'pending'
-          const overdue = stageOverdue(state, s, todayT)
-          const behind = overdue && Math.abs(cal.workdaysBetween(todayT, overdue === 'finish' ? s.end : s.start))
-          // projectSchedule carries a span only for work still to do, so a
-          // closed station, a finished unit and a running station with no days
-          // left all come back undefined here rather than slipping.
-          const pspan = tracking && proj && proj.spans[o.key]
-          const slip = pspan ? cal.workdaysBetween(s.end, pspan.end) : 0
           return <div key={o.key}
-            className={`bar plan${overdue || slip > 0 ? ' behind' : ''}`
-              + `${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
+            className={`bar plan${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
             onPointerDown={onDragStage ? (e) => down(e, 'plan', o.key) : undefined}
             onPointerMove={onDragStage ? move : undefined}
             onPointerUp={onDragStage ? up : undefined}
             onPointerCancel={onDragStage ? up : undefined}
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
-              + (overdue || slip > 0
-                ? ` — ${[overdue && overdueText(overdue, behind), slip > 0 && slipText(slip)]
-                    .filter(Boolean).join('; ')}`
-                : '')
               + (pinned ? ' — placed by hand' : '')
               + (built ? (steps[o.key].length === 1
                   ? `. 1 step, ${j[o.key]} days — edit it to change the station's length`
@@ -2990,12 +2992,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           const built = Boolean(steps && steps[o.key].length)
           return (
             <div key={`p-${o.key}`}
-              className={`bar proj${onDragProjected ? ' draggable' : ''}${running ? ' running' : ''}${liveProj ? ' dragging' : ''}`}
+              className={`bar proj${ringReason[o.key] ? ' behind' : ''}`
+                + `${onDragProjected ? ' draggable' : ''}${running ? ' running' : ''}${liveProj ? ' dragging' : ''}`}
               onPointerDown={onDragProjected ? (e) => down(e, 'proj', o.key) : undefined}
               onPointerMove={onDragProjected ? move : undefined}
               onPointerUp={onDragProjected ? up : undefined}
               onPointerCancel={onDragProjected ? up : undefined}
               title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
+                + (ringReason[o.key] ? ` — ${ringReason[o.key]}` : '')
                 + (!onDragProjected ? ''
                   : running ? '. Running now — drag the right edge to change the days left'
                   : built ? '. Drag to place it; its length comes from its steps'
@@ -3167,10 +3171,14 @@ function Style() {
     .bar.proj.draggable.running { cursor: default; }
     .bar.proj.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
     .bar.proj.draggable:hover .grip { background: #FFF; opacity: .5; border-radius: 2px; }
-    /* Drawn just inside the bar's own edge. Bars sit 3px apart, so two outward
-       2px rings would need 4px and overlap: three ringed stations on one row
-       merged into a single long ring and stopped saying which were late. */
-    .bar.behind { outline: 2px solid #B3382E; outline-offset: -1px; }
+    /* This station is behind: its planned dates have gone by with the work not
+       done, or it is tracking past the date the plan set for it. On the
+       projection bar, because it is a statement about where the work is going
+       rather than about the plan. Drawn just inside the bar's own edge: bars
+       sit 3px apart, so two outward 2px rings would need 4px and overlap, and
+       three ringed stations on a row merged into one long ring that stopped
+       saying which were late. */
+    .bar.proj.behind { outline: 2px solid #B3382E; outline-offset: -1px; }
     /* the plan is the lane you drag: move from the middle, stretch from an edge */
     .bar.plan.draggable { cursor: grab; touch-action: none; }
     .bar.plan.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
