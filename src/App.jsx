@@ -402,6 +402,103 @@ export default function App() {
     stepTimers.current.set(id, setTimeout(() => flushStep(id), SAVE_AFTER))
   }, [flushStep])
 
+  // --- Undo, for drags on the board ---------------------------------------
+  //
+  // A drag is the one edit on the board with no field to retype: the bar lands
+  // where the pointer let go and the old dates are gone. So each drag records
+  // what it overwrote, and undoing is writing those values back down the same
+  // path they were changed by -- no separate code for putting things back, and
+  // the debounced save and the realtime broadcast behave exactly as they would
+  // for any other edit.
+  //
+  // Only the keys a drag actually touches are kept, which is what makes this
+  // safe against a second person editing the same unit meanwhile: undoing a
+  // moved bar restores that stage's pin and day count, and leaves everything
+  // else on the unit as it now stands.
+  const UNDO_MAX = 50
+  const [undoStack, setUndoStack] = useState([])
+  const [redoStack, setRedoStack] = useState([])
+  const [flash, setFlash] = useState('')
+  const flashTimer = useRef(null)
+  const say = useCallback((text) => {
+    setFlash(text)
+    clearTimeout(flashTimer.current)
+    flashTimer.current = setTimeout(() => setFlash(''), 3000)
+  }, [])
+  useEffect(() => () => clearTimeout(flashTimer.current), [])
+
+  // The values a patch is about to overwrite, read from the same rows the save
+  // writes to -- `jobs` and `steps`, not the derived `units`, whose day counts
+  // are recomputed from steps and would restore a number nobody stored.
+  const jobsRef = useRef(jobs)
+  const stepsRef = useRef(steps)
+  jobsRef.current = jobs
+  stepsRef.current = steps
+  const priorValues = useCallback((kind, id, patch) => {
+    const rows = kind === 'job' ? jobsRef.current : stepsRef.current
+    const row = rows.find((r) => r.id === id)
+    if (!row) return null
+    return Object.fromEntries(Object.keys(patch).map((k) => [k, row[k]]))
+  }, [])
+
+  const write = useCallback((kind, id, patch) => {
+    if (kind === 'job') saveJob(id, patch)
+    else saveStep(id, patch)
+  }, [saveJob, saveStep])
+
+  // Save, remembering what was there. Everything a drag writes goes through
+  // this; nothing else does, because every other edit on the board is a field
+  // you can simply type back.
+  const saveDrag = useCallback((kind, id, patch, label) => {
+    const values = priorValues(kind, id, patch)
+    if (values) {
+      setUndoStack((st) => [...st, { kind, id, values, label }].slice(-UNDO_MAX))
+      setRedoStack([])
+    }
+    write(kind, id, patch)
+  }, [priorValues, write])
+
+  // Undo and redo are the same move in opposite directions: pop an entry, keep
+  // what it is about to overwrite for the other stack, write it back.
+  const step = useCallback((from, setFrom, setTo, verb) => {
+    const entry = from[from.length - 1]
+    if (!entry) { say(`Nothing to ${verb}`); return }
+    setFrom((st) => st.slice(0, -1))
+    const values = priorValues(entry.kind, entry.id, entry.values)
+    // The row went away -- removed here or by somebody else. Drop the entry
+    // rather than resurrecting a value onto nothing.
+    if (!values) { say(`Could not ${verb}: that has been removed`); return }
+    setTo((st) => [...st, { ...entry, values }].slice(-UNDO_MAX))
+    write(entry.kind, entry.id, entry.values)
+    say(`${verb === 'undo' ? 'Undid' : 'Redid'} — ${entry.label}`)
+  }, [priorValues, write, say])
+  const undo = useCallback(() => step(undoStack, setUndoStack, setRedoStack, 'undo'), [step, undoStack])
+  const redo = useCallback(() => step(redoStack, setRedoStack, setUndoStack, 'redo'), [step, redoStack])
+
+  // Ctrl+Z on the board, Cmd+Z on a Mac, with Shift or Ctrl+Y to put it back.
+  // Bound only while the board is open, since it is the only view that edits by
+  // dragging, and never while a field has the caret -- there the browser's own
+  // undo belongs to whatever is being typed.
+  useEffect(() => {
+    if (view !== 'board') return undefined
+    const onKey = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const k = e.key.toLowerCase()
+      if (k !== 'z' && k !== 'y') return
+      const t = e.target
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return
+      e.preventDefault()
+      if (k === 'z' && !e.shiftKey) undo()
+      else redo()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [view, undo, redo])
+
+  // A step reads as "WO-26-0041 — cut rails", since its own name means little
+  // without the unit it is on.
+  const stepLabel = (sched, st) => `${sched.unit} — ${st.name || 'unnamed step'}`
+
   const addStep = useCallback(async (job, stage) => {
     const cur = (steps || []).filter((r) => r.job_id === job.id && r.stage === stage)
     // A station being broken down for the first time keeps the length it
@@ -678,11 +775,11 @@ export default function App() {
       start = moved > span.end ? strip(span.end) : moved
       dur = workdaysInclusive(start, span.end, cal)
     }
-    saveJob(jobId, {
+    saveDrag('job', jobId, {
       pins: { ...job.pins, [key]: start },
       ...(Math.max(1, dur) === job[key] ? {} : { [key]: Math.max(1, dur) }),
-    })
-  }, [units, scheduled, stepsByJob, cal, pinsEnabled, saveJob])
+    }, `${job.unit} — planned ${STAGE_LABEL[key].toLowerCase()}`)
+  }, [units, scheduled, stepsByJob, cal, pinsEnabled, saveDrag])
 
   // Dragging a step bar, the same two gestures the station bars take. An edge
   // changes how long the step takes; the middle holds it back.
@@ -706,7 +803,7 @@ export default function App() {
     if (mode === 'end') {
       const end = addDays(span.end, deltaDays)
       const days = workdaysInclusive(span.start, end < span.start ? span.start : end, cal)
-      if (days !== step.days) saveStep(stepId, { days: Math.max(1, days) })
+      if (days !== step.days) saveDrag('step', stepId, { days: Math.max(1, days) }, stepLabel(sched, step))
       return
     }
     // Where the drag wants the step to start, as a working-day offset from the
@@ -721,11 +818,11 @@ export default function App() {
       // The left edge moves the start and keeps the finish, so it is a resize
       // as well as a wait.
       const days = workdaysInclusive(from > span.end ? strip(span.end) : from, span.end, cal)
-      saveStep(stepId, { lag, days: Math.max(1, days) })
+      saveDrag('step', stepId, { lag, days: Math.max(1, days) }, stepLabel(sched, step))
       return
     }
-    if (lag !== (step.lag || 0)) saveStep(stepId, { lag })
-  }, [stepsByJob, scheduled, cal, saveStep])
+    if (lag !== (step.lag || 0)) saveDrag('step', stepId, { lag }, stepLabel(sched, step))
+  }, [stepsByJob, scheduled, cal, saveDrag])
 
   // Hand a stage back to the scheduler.
   const releasePin = useCallback((job, key) => {
@@ -743,8 +840,24 @@ export default function App() {
   }, [units, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
 
-  // Dragging the projection — the lower, solid lane. It is derived, so a drag
-  // has to land somewhere real:
+  // Would this pin actually move the projected bar it was dragged from?
+  const projectionMoves = useCallback((jobId, key, patch, span) => {
+    try {
+      const trial = units.map((u) => (u.id === jobId ? { ...u, ...patch } : u))
+      const after = projectSchedule(trial, caps, today, cal).find((p) => p.id === jobId)
+      const moved = after && after.spans[key]
+      // No span at all means the station has no work left to place; treat that
+      // as no move rather than writing a pin against nothing.
+      return Boolean(moved) && moved.start.getTime() !== span.start.getTime()
+    } catch {
+      // A calendar with nowhere to put the work cannot answer; let the pin
+      // through rather than swallowing the drag.
+      return true
+    }
+  }, [units, caps, today, cal])
+
+  // Dragging the projection — the lower, outlined lane. It is derived, so a
+  // drag has to land somewhere real:
   //
   //   a station not started yet  middle pins it, an edge sets its days
   //   the station running now    an edge sets the days the shop says are left
@@ -770,7 +883,18 @@ export default function App() {
         const built = (stepsByJob.get(jobId) || {})[key]
         if (!(built && built.length)) patch[key] = Math.max(1, days)
       }
-      saveJob(jobId, patch)
+      // Dragging here writes a pin, and a pin means two different things to the
+      // two schedulers. The plan honours it verbatim; the projection treats it
+      // as an earliest, never booking work before today or before capacity can
+      // take it. So a pin the projection will ignore moves only the planned bar
+      // in the lane above -- the bar under the pointer springs back and the one
+      // nobody grabbed jumps to a date nobody pointed at.
+      //
+      // Rather than guess where that floor is, try the pin and look: project
+      // again with it applied and keep it only if the bar being dragged
+      // actually moved. Once per release, not per pointer move.
+      if (mode === 'move' && !projectionMoves(jobId, key, patch, span)) return
+      saveDrag('job', jobId, patch, `${job.unit} — projected ${STAGE_LABEL[key].toLowerCase()}`)
       return
     }
     if (mode !== 'end') return
@@ -779,15 +903,19 @@ export default function App() {
       workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
     if (running) {
       // What is left on the station the unit is standing in.
-      if (days !== (job.daysLeft == null ? job[key] : job.daysLeft)) saveJob(jobId, { daysLeft: days })
+      if (days !== (job.daysLeft == null ? job[key] : job.daysLeft)) {
+        saveDrag('job', jobId, { daysLeft: days }, `${job.unit} — days left in ${STAGE_LABEL[key].toLowerCase()}`)
+      }
       return
     }
     // A station built from steps is as long as its steps; the number would be
     // written and then ignored, so the bar would spring back.
     const built = (stepsByJob.get(jobId) || {})[key]
     if (built && built.length) return
-    if (days !== job[key]) saveJob(jobId, { [key]: days })
-  }, [units, projById, stepsByJob, cal, pinsEnabled, saveJob])
+    if (days !== job[key]) {
+      saveDrag('job', jobId, { [key]: days }, `${job.unit} — projected ${STAGE_LABEL[key].toLowerCase()}`)
+    }
+  }, [units, projById, stepsByJob, cal, pinsEnabled, saveDrag, projectionMoves])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
   // Closed stations by unit, then by station.
@@ -1362,11 +1490,13 @@ export default function App() {
         </label>
         <button className="btn sm" onClick={resettleBoard}
           title="Apply the current sort again">Re-sort rows</button>
+        {flash && <div className="flash" role="status">{flash}</div>}
         {calendarEnabled
           ? <div className="hint">Click any date to close or open that day</div>
           : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
         {pinsEnabled
-          ? <div className="hint">Drag the board to pan it; drag a planned bar to place a stage by hand, or an edge to change its days</div>
+          ? <div className="hint">Drag the board to pan it; drag a planned bar to place a stage by hand, or an edge to change its days.
+              <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes a drag</div>
           : <div className="hint bad">Dragging stages needs the <code>*_pinned_start</code> columns on <code>jobs</code> — see supabase/schema.sql</div>}
       </div>
 
@@ -2843,6 +2973,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // draws, reached from the unit's stage alone -- the board is never handed the
   // stage log.
   const rank = STAGE_RANK[j.stage || 'none'] || 0
+  // Where today sits on the track, for the floor under a projection drag.
+  const todayX = dayIndex(new Date(todayT)) * COL
   // Which stations are behind, and why, worded for the ring's tooltip. Worked
   // out once for the row rather than inside a bar map, because the mark now
   // sits on the projection lane while the dates it is measured against are the
@@ -2878,6 +3010,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // until the pointer comes up, so a drag can be abandoned by putting the bar
   // back where it came from.
   const [drag, setDrag] = useState(null)
+  const dragRef = useRef(null)
   const snap = drag ? Math.round(drag.dx / COL) * COL : 0
 
   // One gesture, three kinds of bar. `lane` says which, so the preview knows
@@ -2890,20 +3023,34 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
     e.preventDefault()
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    setDrag({ lane, key, stepId, mode, x0: e.clientX, dx: 0 })
+    const d = { lane, key, stepId, mode, x0: e.clientX, dx: 0 }
+    dragRef.current = d
+    setDrag(d)
   }
-  const move = (e) => setDrag((d) => (d ? { ...d, dx: e.clientX - d.x0 } : d))
-  const up = () => setDrag((d) => {
-    if (d) {
-      const n = Math.round(d.dx / COL)
-      if (n !== 0) {
-        if (d.lane === 'step') onDragStep(j.id, d.key, d.stepId, d.mode, n)
-        else if (d.lane === 'proj') onDragProjected(j.id, d.key, d.mode, n)
-        else onDragStage(j.id, d.key, d.mode, n)
-      }
-    }
-    return null
-  })
+  const move = (e) => {
+    const d = dragRef.current
+    if (!d) return
+    dragRef.current = { ...d, dx: e.clientX - d.x0 }
+    setDrag(dragRef.current)
+  }
+  // The release is what writes the change, so it happens here and not inside a
+  // state updater. React is free to run an updater more than once -- StrictMode
+  // does exactly that -- and sending the drag from in there sent it twice. That
+  // was invisible while a repeat only rewrote the same dates, but it stacks two
+  // undo entries for one gesture, so one press would put back half a drag. The
+  // gesture is therefore held in a ref as well, written only from the pointer
+  // handlers, with the state copy left to drive the preview.
+  const up = () => {
+    const d = dragRef.current
+    dragRef.current = null
+    setDrag(null)
+    if (!d) return
+    const n = Math.round(d.dx / COL)
+    if (n === 0) return
+    if (d.lane === 'step') onDragStep(j.id, d.key, d.stepId, d.mode, n)
+    else if (d.lane === 'proj') onDragProjected(j.id, d.key, d.mode, n)
+    else onDragStage(j.id, d.key, d.mode, n)
+  }
 
   return (
     <>
@@ -2983,7 +3130,10 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
           const liveProj = drag && drag.lane === 'proj' && drag.key === o.key
           if (liveProj) {
-            if (drag.mode === 'move') x += snap
+            // The projection never books work before today, so the bar stops at
+            // the today line rather than following the pointer past it and
+            // springing back on release.
+            if (drag.mode === 'move') x = Math.max(todayX, x + snap)
             else if (drag.mode === 'end') w = Math.max(COL, w + snap)
             else { const d = Math.min(snap, w - COL); x += d; w -= d }
           }
@@ -3134,6 +3284,10 @@ function Style() {
     .dayhead.ovr::before { content: ''; position: absolute; left: 3px; right: 3px; bottom: 1px; height: 2px; border-radius: 1px; background: #C0722F; }
     .offchip { background: #F5F6F7; border: 1px solid #C6CDD1; }
     .hint { color: #7A848C; }
+    .flash { font-weight: 600; color: #2D6044; background: #E1EEE6; border: 1px solid #BBD8C7;
+      border-radius: 4px; padding: 3px 9px; white-space: nowrap; }
+    kbd { font-family: inherit; font-size: 10px; font-weight: 700; border: 1px solid #C6CDD1;
+      border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: #FFF; color: #3A434B; }
     .hint.bad { color: #B3382E; }
     .hint code { background: #E4E8EA; padding: 1px 4px; border-radius: 3px; }
     .rowlabel { position: sticky; left: 0; background: #FFF; z-index: 2; border-top: 1px solid #E4E8EA; border-right: 1px solid #D4D9DC; padding: 8px 10px; cursor: pointer; }
