@@ -135,7 +135,7 @@ station that ran in June would otherwise borrow a projection reading October. Th
 hidden by default, since the work ahead is what a foreman is being handed; **Include stations
 already finished** puts them back for anyone checking over them.
 
-A **Due** date ringed in red has already gone by with that station still open — the same mark the board puts on the bar, and the one to work from, since *Against plan* will read late on nearly everything while the shop is behind.
+A date ringed in red has already gone by with that station still open — the same mark the board puts on the bar. The ring lands on whichever date is blown: the **planned start** for a station not begun, the **Due** date for one still running. It is the mark to work from, since *Against plan* reads late on nearly everything while the shop is behind, and the section headings count both. These marks use the just-in-time plan, so unlike the board's they do not follow the **Level to capacity** toggle.
 
 Each section has its own **Download CSV**, and **Download all three** puts every station in one
 file with a Station column. The files carry the same columns as the tables plus the unit's
@@ -317,7 +317,7 @@ A station the unit has already passed never rings, whatever its dates say. A uni
 
 The ring is measured on each station's own planned dates, not on whether the unit will make its delivery — that is said by the flag on the label and by bars running past the delivery mark — and not on where the projection puts the work, which is what the Foremen tab's *Against plan* column shows. The two answer different questions: in a shop running behind, nearly everything is projected past plan, so ringing on that would mark every bar and say nothing. Overdue marks only what there is something to do about today.
 
-With **Level to capacity** on there is nothing overdue to report, since a levelled plan books no work before today, so the rings clear. That is the levelled plan being a fresh plan from today forward, not the problem going away — the Foremen tab always reads the just-in-time plan and keeps its marks either way.
+With **Level to capacity** on the rings clear, because a levelled plan books no work before today — the only exception is a stage pinned by hand to a date already past, which is honoured verbatim and still rings. That is the levelled plan being a fresh plan from today forward, not the problem going away: the Foremen tab always reads the just-in-time plan, so it keeps its marks whichever way the toggle is set.
 
 Colour says *which station*, and nothing else. How late a unit is running is the red `+Nd` flag beside its work-order number, and how far its bars run past the ▼ delivery mark.
 
