@@ -4,6 +4,7 @@ import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, STAGE_LABEL, STAGE_RANK, stageDates,
   workdaysInclusive, hasPins, stepPlan, stepSpans, stepLanes, stepDependsOn,
+  PRIORITY_DEFAULT, PRIORITY_MAX,
 } from './engine.js'
 
 const COL = 26
@@ -107,6 +108,9 @@ export default function App() {
   // The steps each station breaks into, per unit. Empty is the normal state:
   // a station with no steps keeps using its own typed day count.
   const [steps, setSteps] = useState([])
+  // False until the priority column exists on jobs, so a shop that has not run
+  // the migration still gets a board -- just without the lever.
+  const [priorityEnabled, setPriorityEnabled] = useState(true)
   // False until the job_steps table exists, so the board still runs without it.
   const [stepsEnabled, setStepsEnabled] = useState(true)
   // Which units are showing their steps on the board.
@@ -137,6 +141,7 @@ export default function App() {
       const has = (k) => jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], k)
       setTrackingEnabled(has('stage'))
       setPinsEnabled(has('fab_pinned_start'))
+    setPriorityEnabled(has('priority'))
       setJobs(jrows.map((r) => ({
         id: r.id, unit: r.unit, desc: r.description || '',
         delivery: parseDate(r.delivery_date),
@@ -145,6 +150,8 @@ export default function App() {
         stage: r.stage || 'none',
         stageStarted: r.stage_started ? parseDate(r.stage_started) : null,
         daysLeft: r.days_left == null ? null : r.days_left,
+        // 1..10, higher first; the middle when the column is not there yet
+        priority: r.priority == null ? PRIORITY_DEFAULT : r.priority,
         // Stages the shop has placed by hand; absent keys mean the scheduler chooses.
         pins: OPS.reduce((m, o) => {
           const v = r[`${o.key}_pinned_start`]
@@ -278,6 +285,7 @@ export default function App() {
     if (patch.stage !== undefined) row.stage = patch.stage
     if (patch.stageStarted !== undefined) row.stage_started = patch.stageStarted ? isoDate(patch.stageStarted) : null
     if (patch.daysLeft !== undefined) row.days_left = patch.daysLeft
+    if (patch.priority !== undefined) row.priority = patch.priority
     if (patch.pins !== undefined) OPS.forEach((o) => {
       row[`${o.key}_pinned_start`] = patch.pins[o.key] ? isoDate(patch.pins[o.key]) : null
     })
@@ -887,7 +895,7 @@ export default function App() {
   const [boardSort, setBoardSort] = useState(() => {
     try {
       const v = window.localStorage.getItem('boardSort')
-      return ['start', 'delivery', 'projected'].includes(v) ? v : 'start'
+      return ['start', 'delivery', 'projected', 'priority'].includes(v) ? v : 'start'
     } catch { return 'start' }
   })
   const pickSort = useCallback((v) => {
@@ -896,6 +904,9 @@ export default function App() {
   }, [])
   const resettleBoard = useCallback(() => {
     const key = (j) => {
+      // negated, so the one comparator that sorts ascending puts the highest
+      // priority at the top where it belongs
+      if (boardSort === 'priority') return -(j.priority == null ? PRIORITY_DEFAULT : j.priority)
       if (boardSort === 'delivery') return +j.delivery
       if (boardSort === 'projected') {
         const p = projRef.current.get(j.id)
@@ -1126,7 +1137,7 @@ export default function App() {
   const sortBy = useCallback((key) => {
     setSort((cur) => cur.key === key
       ? { key, dir: -cur.dir }
-      : { key, dir: ['variance', 'left', 'fab', 'paint', 'asm'].includes(key) ? -1 : 1 })
+      : { key, dir: ['priority', 'variance', 'left', 'fab', 'paint', 'asm'].includes(key) ? -1 : 1 })
   }, [])
 
   const tableRows = useMemo(() => {
@@ -1310,6 +1321,7 @@ export default function App() {
             <option value="start">Fabrication start</option>
             <option value="delivery">Planned delivery date</option>
             <option value="projected">Projected delivery date</option>
+            {priorityEnabled && <option value="priority">Priority</option>}
           </select>
         </label>
         <button className="btn sm" onClick={resettleBoard}
@@ -1386,6 +1398,7 @@ export default function App() {
       </div>
       </>) : view === 'table' ? (
         <OrdersTable rows={tableRows} parts={parts} partsEnabled={partsEnabled}
+          priorityEnabled={priorityEnabled}
           onSave={saveJob} onApplyPart={applyPart} onResort={resortTable}
           projById={projById} tracking={trackingEnabled} onAdvance={advanceStage} today={today}
           sort={sort} onSort={sortBy} cal={cal}
@@ -1415,6 +1428,15 @@ export default function App() {
             <input value={sel.unit} onChange={(e) => saveJob(sel.id, { unit: e.target.value })} /></div>
           <div className="field"><span>Description</span>
             <input value={sel.desc} onChange={(e) => saveJob(sel.id, { desc: e.target.value })} /></div>
+          {priorityEnabled && (
+            <div className="field"><span>Priority</span>
+              <input className="num" type="number" min="1" max={PRIORITY_MAX}
+                value={sel.priority == null ? PRIORITY_DEFAULT : sel.priority}
+                title={`1 to ${PRIORITY_MAX}, higher goes first. ${PRIORITY_DEFAULT} is the middle.`}
+                onChange={(e) => saveJob(sel.id, {
+                  priority: Math.min(PRIORITY_MAX, Math.max(1, parseInt(e.target.value) || PRIORITY_DEFAULT)),
+                })} /></div>
+          )}
           <div className="field"><span>Delivery date</span>
             <input type="date" value={isoDate(sel.delivery)}
               onChange={(e) => e.target.value && saveJob(sel.id, { delivery: parseDate(e.target.value) })} /></div>
@@ -1698,7 +1720,7 @@ function SignIn() {
   )
 }
 
-function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort, projById, tracking,
+function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
   showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns }) {
   // Which column is being dragged, and which one the pointer is over. Transient
@@ -1721,7 +1743,8 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
   // calls conditional the moment the last unit is deleted.
   if (rows.length === 0) return <div className="notice">No units yet. Add one below.</div>
   // How wide a step's own row has to be to reach the end of the table.
-  const colSpan = 2 + (tracking ? 3 : 0) + 2 + (partsEnabled ? 1 : 0) + 1 + OPS.length
+  const colSpan = 2 + (priorityEnabled ? 1 : 0) + (tracking ? 3 : 0) + 2
+    + (partsEnabled ? 1 : 0) + 1 + OPS.length
   // Tabbing out of a date crosses every other field before reaching the next
   // one, which is the wrong shape for working down the book. Enter jumps
   // straight to the date below. Arrow keys are left alone — the browser uses
@@ -1756,6 +1779,22 @@ function OrdersTable({ rows, parts, partsEnabled, onSave, onApplyPart, onResort,
             : <span className="twist gap" />}
           <input value={j.unit} onChange={(e) => onSave(j.id, { unit: e.target.value })} />
         </div></td>
+      ),
+    },
+    priorityEnabled && {
+      key: 'priority', label: 'Priority', cls: 'w-num',
+      cell: ({ j }) => (
+        <td key="priority">
+          {/* 1..10, higher first. Clamped on the way in rather than trusted:
+              the database has the same check, and a rejected write would only
+              be noticed later. */}
+          <input type="number" min="1" max={PRIORITY_MAX} className="prio"
+            value={j.priority == null ? PRIORITY_DEFAULT : j.priority}
+            title={`1 to ${PRIORITY_MAX}, higher goes first. ${PRIORITY_DEFAULT} is the middle.`}
+            onChange={(e) => onSave(j.id, {
+              priority: Math.min(PRIORITY_MAX, Math.max(1, parseInt(e.target.value) || PRIORITY_DEFAULT)),
+            })} />
+        </td>
       ),
     },
     {
@@ -2612,6 +2651,13 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           {j.unit}
           {tracking && proj && proj.slipping && <span className="flag">+{proj.variance}d</span>}
           {!tracking && j.late && <span className="flag">{j.lateDays ? `LATE +${j.lateDays}d` : 'BEHIND'}</span>}
+          {/* only when somebody has actually moved it: a board where every row
+              says 50 is a board with a column of noise down the side */}
+          {j.priority != null && j.priority !== PRIORITY_DEFAULT && (
+            <span className={`flag prio${j.priority > PRIORITY_DEFAULT ? ' up' : ' down'}`}
+              title={`Priority ${j.priority} of ${PRIORITY_MAX} — ${j.priority > PRIORITY_DEFAULT ? 'ahead of' : 'behind'} the units at ${PRIORITY_DEFAULT}`}>
+              P{j.priority}</span>
+          )}
           {j.conflict && <span className="flag seq" title="A stage is pinned across one that has to come before it. Move it, or release the pin.">OVERLAP</span>}
         </div>
         <div className="desc" title={`${pn ? `${pn} · ` : ''}${j.desc ? `${j.desc} · ` : ''}deliver ${fmt(j.delivery)}`}>
@@ -2883,6 +2929,11 @@ function Style() {
     .grip.l { left: 0; } .grip.r { right: 0; }
     .bar.plan.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
     .flag.seq { background: #96581F; }
+    /* priority reads as a rank, not an alarm, so it borrows the flag's shape
+       and none of its red: raised is the board's own blue, lowered is grey */
+    .flag.prio { font-variant-numeric: tabular-nums; }
+    .flag.prio.up { background: #44688F; }
+    .flag.prio.down { background: #8A949C; }
     .pinchipkey { background: #FFF; border: 2px solid #5B6670; box-sizing: border-box; }
     .pinline { margin: 14px 0 4px; padding: 10px 12px; background: #F9FAFB; border: 1px solid #E4E8EA;
       border-radius: 5px; font-size: 12px; color: #5B6670; display: flex; flex-direction: column; gap: 8px; }
@@ -3138,6 +3189,7 @@ function Style() {
     .orders td.calc.bad { color: #B3382E; font-weight: 600; }
     .orders .w-unit { width: 130px; } .orders .w-pn { width: 110px; }
     .orders .w-date { width: 150px; } .orders .w-num { width: 66px; } .orders .w-calc { width: 110px; }
+    .orders input.prio { text-align: center; font-variant-numeric: tabular-nums; }
     .orders .w-num input { text-align: center; }
     .addrow { margin: 0 24px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   `}</style>

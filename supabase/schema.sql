@@ -57,6 +57,15 @@ alter table public.jobs
   add column if not exists paint_pinned_start date,
   add column if not exists asm_pinned_start date;
 
+-- How important a unit is, 1 to 10, higher first. It decides who gets a station
+-- when two units want the same one, and it outranks the delivery date: a 10
+-- takes the next open bay ahead of everything, including work due sooner. 5 is
+-- the neutral middle, so a shop that never touches the number is scheduled
+-- exactly as it was before this column existed.
+alter table public.jobs
+  add column if not exists priority integer not null default 5
+    check (priority between 1 and 10);
+
 -- Planned against actual, kept as each station closes, so estimates can be
 -- checked against what the trailers really took.
 create table if not exists public.stage_log (

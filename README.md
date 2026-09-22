@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages or step lists existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -181,9 +181,16 @@ Two blocks sit under the board, and they answer different questions.
 The station cap is edited in the planned rows; the floor rows read it back, since a cap belongs to
 the station rather than to a row.
 
-**Sort rows by** orders the board three ways. *Fabrication start* is the shop's question — what goes
+**Priority** is 1 to 10 on each work order, higher first, and it decides who gets a station when two units want the same one. It **outranks the delivery date** — a 10 takes the next open bay ahead of everything, including work due sooner. That is the point of it and it is not free: the units it passes finish later, and the board says so in their variance flags. Work already on a station is never bumped; it is happening now, and a running station ignores capacity anyway.
+
+5 is the neutral middle, so a unit can be pushed either way and a shop that never touches the number is scheduled exactly as it was before the column existed. Raising a unit one point puts it ahead of *every* unit still at 5, not only the one it was tied with — the order is strict, not a nudge, and on a ten-point scale a single point is a large move. A unit off 5 carries a badge on the board, blue above and grey below, so it is clear at a glance which have been moved and which are just taking their turn.
+
+Priority is the unit's own urgency, not the model's, so it lives on the work order and a part number never sets it. With **Level to capacity** on the effect is quieter: a levelled plan books nothing before today, so priority decides who keeps their just-in-time slot rather than making anything finish sooner. The projection — levelling off, the default — is where priority visibly moves work.
+
+**Sort rows by** orders the board four ways. *Fabrication start* is the shop's question — what goes
 on next. *Planned delivery date* is what was promised. *Projected delivery date* is when it will
-really land, which is the one that shows the promises slipping out of order. The choice is
+really land, which is the one that shows the promises slipping out of order. *Priority* reads the
+board in the order the shop has decided, highest first. The choice is
 remembered in the browser, like the column width. The order is held rather than recomputed live, so
 dragging a bar doesn't make its row leap away; **Re-sort rows** applies the current choice again.
 

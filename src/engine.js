@@ -191,6 +191,29 @@ export function pinnedSpan(job, key, cal = defaultCalendar) {
   return { start, end }
 }
 
+// --- Priority -------------------------------------------------------------
+// How important a unit is, 1 to 10, higher first. It decides who gets a station
+// when two units want the same one, and it outranks the delivery date: a 10
+// takes the next open bay ahead of everything, including work due sooner. That
+// is the point of it, and it is not free -- the units it passes finish later,
+// and the board says so in their variance.
+//
+// 5 is the neutral middle, so a unit can be pushed either way and a shop that
+// never touches the number is scheduled exactly as it was before the column
+// existed. Every ordering asks this one function, so a missing or malformed
+// value can never quietly reorder the floor.
+export const PRIORITY_MAX = 10
+export const PRIORITY_DEFAULT = 5
+export const priorityOf = (job) => {
+  const raw = job ? job.priority : null
+  // Nothing set means the middle, not the bottom. Number(null) is 0, which the
+  // clamp below would read as "least important" and quietly schedule the unit
+  // last -- the one thing this function exists to stop.
+  if (raw === null || raw === undefined || raw === '') return PRIORITY_DEFAULT
+  const n = Math.round(Number(raw))
+  return Number.isFinite(n) ? Math.min(PRIORITY_MAX, Math.max(1, n)) : PRIORITY_DEFAULT
+}
+
 // Stations run one after another. A pin can break that — paint pinned to a week
 // before fabrication finishes — and the board says so rather than quietly
 // resequencing the unit behind the shop's back.
@@ -287,7 +310,12 @@ export function levelSchedule(jobs, caps, today, cal = defaultCalendar) {
     if (OPS.some((o) => m[o.key])) pins.set(job.id, m)
   })
 
-  const ordered = [...jobs].sort((a, b) => b.delivery - a.delivery)
+  // Priority first, then latest delivery. Backward, whoever is processed first
+  // claims its ideal block and the rest are squeezed earlier, so ordering first
+  // means keeping the comfortable slot -- the same meaning priority has going
+  // forward. Pinned stages were claimed above this and still beat everything.
+  const ordered = [...jobs].sort((a, b) =>
+    (priorityOf(b) - priorityOf(a)) || (b.delivery - a.delivery))
   const out = []
   ordered.forEach((job) => {
     const pin = pins.get(job.id) || {}
@@ -451,8 +479,13 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
   }
 
   const underway = (j) => { const s = j.stage || 'none'; return s !== 'none' && s !== 'done' }
+  // Work already on a station comes first whatever its priority -- it is
+  // happening now, and a running station ignores capacity anyway. After that
+  // priority decides, then the delivery date, then the work-order number so the
+  // order is never arbitrary.
   const ordered = [...jobs].sort((a, b) =>
-    (underway(b) - underway(a)) || (a.delivery - b.delivery) || String(a.unit).localeCompare(String(b.unit)))
+    (underway(b) - underway(a)) || (priorityOf(b) - priorityOf(a))
+    || (a.delivery - b.delivery) || String(a.unit).localeCompare(String(b.unit)))
 
   const out = []
   ordered.forEach((job) => {
