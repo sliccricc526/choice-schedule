@@ -404,17 +404,14 @@ export const nextStage = (stage) => (stage === 'none' ? 'fab'
 // whatever the shop says is left; stations after it contribute their planned
 // duration; stations already closed contribute nothing at all — which is the
 // point, since a finished operation should stop consuming capacity.
-export function remainingWork(job) {
+export function remainingWork(job, today, cal = defaultCalendar) {
   const stage = job.stage || 'none'
   if (stage === 'done') return []
   const at = stage === 'none' ? -1 : STAGE_AT[stage]
   const out = []
   OPS.forEach((op, i) => {
     if (i < at) return
-    const planned = Math.max(1, job[op.key] || 1)
-    const days = i === at
-      ? Math.max(0, job.daysLeft == null ? planned : job.daysLeft)
-      : planned
+    const days = i === at ? daysToGo(job, today, cal) : Math.max(1, job[op.key] || 1)
     if (days > 0) out.push({ key: op.key, days })
   })
   return out
@@ -436,6 +433,48 @@ export function daysSpent(job, today, cal = defaultCalendar) {
   const start = strip(job.stageStarted)
   if (start > strip(today)) return 0
   return workdaysInclusive(start, today, cal)
+}
+
+// How long the station in progress runs in total, from the day it started.
+//
+// This is what `days_left` holds, and the name is the one piece of history in
+// it: it used to hold the days remaining, which is only true on the day it is
+// typed. Every morning after that the shop had to go down the whole book
+// decrementing, because a remainder counted forward from today walks the
+// projected finish a day later for every day nobody touches it. A run length
+// counted from the start date does not move, so the finish holds still and the
+// remainder can be worked out instead of remembered.
+export function stationRun(job) {
+  const stage = job.stage || 'none'
+  if (stage === 'none' || stage === 'done') return 0
+  const booked = Math.max(1, job[stage] || 1)
+  return Math.max(0, job.daysLeft == null ? booked : job.daysLeft)
+}
+
+// The working days the station in progress still has to go, today included.
+//
+// Never fewer than one, because a station is finished when the shop says so and
+// not when a count runs out. A station that overruns what it was booked for
+// still has work on it; reporting nothing left would drop it out of the
+// projection altogether and start the next station today, which is the board
+// deciding a trailer is painted. One day to go and none left say the same thing
+// about the finish -- both land on today -- so the clamp costs no meaning.
+export function daysToGo(job, today, cal = defaultCalendar) {
+  const stage = job.stage || 'none'
+  if (stage === 'none' || stage === 'done') return 0
+  const run = stationRun(job)
+  const spent = daysSpent(job, today, cal)
+  // No start date means nothing to count from, so the whole run is still to do
+  // and the finish drifts with today -- the old behaviour, and the reason a
+  // start date is worth having.
+  return Math.max(1, spent ? run - spent + 1 : run)
+}
+
+// The run length to store for a station said to have `toGo` days left today.
+// The inverse of daysToGo, so what the shop types in is what it reads back.
+export function runFromDaysToGo(job, today, toGo, cal = defaultCalendar) {
+  const spent = daysSpent(job, today, cal)
+  return Math.max(0, spent ? toGo + spent - 1 : toGo)
 }
 
 // Where the work actually lands: remaining work scheduled FORWARD from today
@@ -489,7 +528,7 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
 
   const out = []
   ordered.forEach((job) => {
-    const work = remainingWork(job)
+    const work = remainingWork(job, today, cal)
     const due = cal.onOrBeforeWorkday(job.delivery)
     const spans = {}
     let cursor = today, end = null

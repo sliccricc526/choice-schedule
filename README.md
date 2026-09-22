@@ -205,7 +205,35 @@ Two consequences worth knowing:
 - A station built from steps **cannot be stretched by dragging its edge**, because its length comes
   from its steps. Drag the middle to move it as usual; change the steps to change how long it takes.
 - **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
-  time. Days left on a station is still its own figure.
+  time. Days left on a station is still its own figure, counted from the day the station started.
+
+### Days left counts itself down
+
+**Days left on a station is not a number anybody has to keep up to date.** It is worked out from
+the day the station started and how long that station is set to run, so it falls by one every
+working day on its own and the projected finish stays where it is.
+
+The figure stored is the run length — the working days the station takes, counted from the day it
+opened — and not the remainder. A remainder is only true on the day it is typed: left alone, a
+projection built on one walks a day later for every day that passes, so the whole book would have
+to be decremented every morning just to keep the board still. Anchored to the start date instead,
+the projection holds until somebody moves it.
+
+Type a number into **Left** in the table or **Days left** in the panel and it means exactly what it
+says — the days still to go as of today — and the run length behind it is adjusted to match, so
+what you type is what you read back. Dragging the right-hand edge of a projection bar does the same
+thing by date. Either way the new finish then holds on its own.
+
+Two things follow from it:
+
+- **A station never runs itself out.** Past the days it was booked for it reports one day to go,
+  finishing today, until the shop closes it with **Move to …**. A station is finished when the shop
+  says so, not when a count reaches zero — and a board that quietly dropped an overrunning station
+  would be claiming a trailer was painted.
+- **A station with no start date cannot be held.** There is nothing to count from, so its whole run
+  reads as still to do and its finish drifts with today, exactly as everything used to. That is the
+  one case where the date has to be filled in — in the panel, under the unit — for the board to
+  stop moving underneath you.
 
 ### Reading the load, and ordering the rows
 
@@ -350,7 +378,7 @@ Any of the three stations can ring, independently, for one reason or both. Hover
 
 A station the unit has already passed has no projection bar, so it cannot ring — which is right: ringing it would report the shop late on work it has finished. A finished unit has no projection bars at all and rings nowhere.
 
-Two consequences of hanging the mark on the projection lane are worth knowing. With production tracking switched off there is no projection lane, so there are no rings. And a station the unit is standing at with **no days left** has no remaining work to project, so it has no bar to carry a ring even if its planned finish has gone by — its unit's other stations still ring.
+One consequence of hanging the mark on the projection lane is worth knowing: with production tracking switched off there is no projection lane, so there are no rings.
 
 Neither reason is about whether the unit will make its **delivery** — that is said by the red `+Nd` flag beside the work-order number and by bars running past the ▼ delivery mark. Both are measured against the station's own planned dates.
 
