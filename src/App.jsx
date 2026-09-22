@@ -1521,7 +1521,8 @@ export default function App() {
             const off = !cal.isWorkday(d), set = cal.isOverridden(d)
             return (
               <div key={i}
-                className={`dayhead ${off ? 'we' : ''} ${set ? 'ovr' : ''} ${d.getTime() === todayT ? 'today' : ''} ${calendarEnabled ? 'clickable' : ''}`}
+                className={`dayhead ${off ? 'we' : ''} ${set ? 'ovr' : ''} ${d.getDate() === 1 ? 'mstart' : ''}`
+                  + ` ${d.getTime() === todayT ? 'today' : ''} ${calendarEnabled ? 'clickable' : ''}`}
                 onClick={() => toggleDay(d)}
                 title={calendarEnabled
                   ? `${fmt(d)} — ${off ? 'closed' : 'working'}${set ? ' (set by hand)' : ''}. Click to ${off ? 'open' : 'close'}.`
@@ -3097,7 +3098,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
         <div className="cellrow" style={{ gridTemplateColumns: `repeat(${days.length}, ${COL}px)` }}>
           {days.map((d, i) => (
             <div key={i} style={{ height: rowH }}
-              className={`cell${!cal.isWorkday(d) ? ' we' : ''}${d.getTime() === todayT ? ' todaycol' : ''}`} />
+              className={`cell${!cal.isWorkday(d) ? ' we' : ''}${d.getDate() === 1 ? ' mstart' : ''}`
+                + `${d.getTime() === todayT ? ' todaycol' : ''}`} />
           ))}
         </div>
         {/* upper lane: the plan the unit was sold on — and the lane you drag */}
@@ -3234,7 +3236,8 @@ function LoadRow({ op, counts, cap, days, todayT, cal, onCap }) {
           const c = counts[i], work = cal.isWorkday(d), over = work && c > cap
           return (
             <div key={i}
-              className={`lcell ${!work ? 'we' : ''} ${d.getTime() === todayT ? 'todaycol' : ''} ${over ? 'over' : ''}`}
+              className={`lcell ${!work ? 'we' : ''} ${d.getDate() === 1 ? 'mstart' : ''}`
+                + ` ${d.getTime() === todayT ? 'todaycol' : ''} ${over ? 'over' : ''}`}
               style={!over && work && c > 0 ? { background: op.light, color: op.color } : undefined}
               title={work ? `${op.label}: ${c} of ${cap}` : undefined}>
               {work && c > 0 ? c : ''}
@@ -3341,6 +3344,10 @@ function Style() {
     .twist:focus-visible { outline: 2px solid #44688F; outline-offset: 1px; }
     .cell.we { background: #F5F6F7; }
     .cell.todaycol::after, .lcell.todaycol::after { content: ''; position: absolute; inset: 0; border-left: 2px solid #1B2126; }
+    /* Where the month turns over, carried down the whole board rather than
+       living in the header strip alone, so October can be found without
+       reading the dates. */
+    .dayhead.mstart, .cell.mstart, .lcell.mstart { border-left-color: #D4D9DC; }
     /* two lanes: the plan on top, where the work actually lands beneath it */
     .bar { position: absolute; top: 12px; height: 20px; border-radius: 3px; }
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
