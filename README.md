@@ -275,6 +275,8 @@ removed, or when **Re-sort rows** is clicked.
 
 On the board each row carries two lanes: the plan on top (light, outlined), and where the remaining work actually lands underneath (the same station colour, filled solid). A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. Every unit with work left shows both lanes, whether or not it is running late: a unit that will make its date still has a projection, and it is the one worth seeing, because it says which week the work is expected to start. Only a finished unit has nothing in the lower lane, having no work left to land.
 
+A **red ring** on a fabrication bar says that station needed to start by now and has not. It appears only while the unit is still standing in front of fabrication — a unit already in paint or assembly started it weeks ago, and ringing that bar would report the shop late on work it has finished. It is measured on fabrication's own planned start, not on whether the unit will make its delivery: that is said by the flag on the label and by bars running past the delivery mark. With **Level to capacity** on there is no overdue start to report, since a levelled plan books nothing before today, so the ring belongs to the unlevelled view.
+
 Colour says *which station*, and nothing else. How late a unit is running is the red `+Nd` flag beside its work-order number, and how far its bars run past the ▼ delivery mark.
 
 Two things worth knowing about the semantics:
