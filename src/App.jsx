@@ -2976,16 +2976,42 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // Parallel steps overlap in time, so each station's steps are spread over as
   // many lines as it takes for none of them to sit on top of another, and the
   // row grows to fit the busiest station.
-  const laid = open && hasSteps
+  //
+  // The steps are laid out twice, once against each station bar: from the
+  // planned start for the block under the plan, and from the projected start
+  // for the block under the projection. A unit's pieces of work then read the
+  // same way its stations do -- what was sold above, what is coming below.
+  const lay = (startOf, keep) => (open && hasSteps
     ? OPS.map((o) => {
-        const list = steps[o.key]
-        if (!list.length) return null
-        const spans = stepSpans(j.spans[o.key].start, list, cal)
+        const list = (steps[o.key] || []).filter(keep)
+        const start = list.length ? startOf(o.key) : null
+        if (!start) return null
+        const spans = stepSpans(start, list, cal)
         return { op: o, spans, ...stepLanes(spans) }
       }).filter(Boolean)
+    : [])
+  const laidPlan = lay((k) => j.spans[k].start, () => true)
+  // A step already ticked off is not work still to come, so it drops out of the
+  // projection. That is also what makes the lane read correctly for the station
+  // in progress: what is left of it runs from where the projection puts it,
+  // while the pieces already done stay struck through in the plan block above
+  // rather than being redrawn in the future. A station with no projected span
+  // -- closed, finished, or running with no days left -- has no block at all.
+  const laidProj = tracking && proj
+    ? lay((k) => (proj.spans[k] || {}).start, (s) => !s.done)
     : []
-  const laneCount = laid.reduce((n, l) => Math.max(n, l.count), 0)
-  const rowH = laneCount ? 44 + laneCount * 18 + 4 : 46
+  const planLanes = laidPlan.reduce((n, l) => Math.max(n, l.count), 0)
+  const projLanes = laidProj.reduce((n, l) => Math.max(n, l.count), 0)
+  // Geometry, top down: the planned bar, its steps, the projected bar, its
+  // steps. Each block of steps sits under the bar whose start it is measured
+  // from, so the row divides into a plan half and a projection half. With the
+  // unit collapsed this puts the projection back at 24px, exactly where it sits
+  // on a row with no steps at all.
+  const STEP_LANE = 18
+  const planStepsTop = 23
+  const projTop = planLanes ? planStepsTop + planLanes * STEP_LANE + 2 : 24
+  const projStepsTop = projTop + 17
+  const rowH = Math.max(46, projStepsTop + projLanes * STEP_LANE + (projLanes ? 4 : 5))
   // Where the unit is standing, as a number, so each station can say whether it
   // is behind the unit, under it, or still ahead. The same split stageDates()
   // draws, reached from the unit's stage alone -- the board is never handed the
@@ -3174,45 +3200,73 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                   : running ? '. Running now — drag the right edge to change the days left'
                   : built ? '. Drag to place it; its length comes from its steps'
                   : '. Drag to place it, drag an edge to change its days')}
-              style={{ left: x + 1, width: w - 3, background: o.light, borderColor: o.color, color: o.color }}>
+              style={{ left: x + 1, width: w - 3, top: projTop,
+                background: o.light, borderColor: o.color, color: o.color }}>
               {onDragProjected && !running && <span className="grip l" />}
               {onDragProjected && !(built && !running) && <span className="grip r" />}
             </div>
           )
         })}
-        {/* the steps each station breaks into. Two that run side by side are
-            drawn side by side, on their own lines, because that is what the
-            station's length is now built from. */}
-        {laid.map(({ op, spans, lane }) => spans.map((st) => {
-          let x = dayIndex(st.start) * COL
-          let w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
-          const liveStep = drag && drag.lane === 'step' && drag.stepId === st.id
-          if (liveStep) {
-            if (drag.mode === 'move') x += snap
-            else if (drag.mode === 'end') w = Math.max(COL, w + snap)
-            else { const d = Math.min(snap, w - COL); x += d; w -= d }
-          }
-          const waits = (st.needs || []).length
-          return (
-            <div key={st.id}
-              className={`bar step${st.done ? ' done' : ''}${onDragStep ? ' draggable' : ''}${liveStep ? ' dragging' : ''}`}
-              onPointerDown={onDragStep ? (e) => down(e, 'step', op.key, st.id) : undefined}
-              onPointerMove={onDragStep ? move : undefined}
-              onPointerUp={onDragStep ? up : undefined}
-              onPointerCancel={onDragStep ? up : undefined}
-              title={`${op.label}: ${st.name || 'unnamed step'} — ${st.days} d, ${fmt(st.start)} – ${fmt(st.end)}`
-                + `, starts on day ${st.offset + 1} of the station`
-                + (waits ? `, after ${waits} other${waits === 1 ? '' : 's'}` : ', with the station')
-                + (st.lag ? `, held back ${st.lag} d` : '')
-                + (st.done ? ' (done)' : '')
-                + (onDragStep ? '. Drag to hold it back, drag an edge to change its days.' : '')}
-              style={{ left: x + 1, width: w - 3, top: 41 + lane.get(st.id) * 18,
-                background: op.light, borderColor: op.color, color: op.color }}>
-              {onDragStep && <><span className="grip l" /><span className="grip r" /></>}
-              <span>{st.name || '—'}</span>
-            </div>
-          )
-        }))}
+        {/* the steps each station breaks into, drawn against both bars and
+            filled the way their bar is: the plan stated flatly, what is coming
+            sketched. Two steps that run side by side are drawn side by side, on
+            their own lines, because that is what the station's length is built
+            from. */}
+        {[['splan', laidPlan, planStepsTop], ['sproj', laidProj, projStepsTop]].map(([kind, groups, top]) =>
+          groups.map(({ op, spans, lane }) => spans.map((st) => {
+            let x = dayIndex(st.start) * COL
+            let w = (dayIndex(st.end) - dayIndex(st.start) + 1) * COL
+            // Only the planned block is dragged. A step's lag and length are
+            // counted from its station's planned start, so that is the bar the
+            // gesture belongs to; the projected block is where the answer
+            // lands, and grabbing it would have nowhere to write.
+            const drags = kind === 'splan' && Boolean(onDragStep)
+            const liveStep = drags && drag && drag.lane === 'step' && drag.stepId === st.id
+            if (liveStep) {
+              if (drag.mode === 'move') x += snap
+              else if (drag.mode === 'end') w = Math.max(COL, w + snap)
+              else { const d = Math.min(snap, w - COL); x += d; w -= d }
+            }
+            const waits = (st.needs || []).length
+            // Solid fill for the plan, outline for the projection, the same way
+            // the station bars above them read. A step already done is drawn
+            // outlined in either block: .done fades the bar to .55, and fading a
+            // solid bar takes its white label with it -- on paint the label came
+            // out at 1.96:1. Outlined, a done step keeps the contrast it has
+            // today and still recedes.
+            const plan = kind === 'splan' && !st.done
+            // A running station is the one place the two can disagree: its
+            // projected bar is as long as the days the shop says are left,
+            // while its steps are as long as the chain through whatever has not
+            // been ticked off. When the steps run longer the block overhangs
+            // its bar, which is worth saying rather than looking like a slip of
+            // the pen. Everywhere else the two end on the same day.
+            const past = kind === 'sproj' && proj && proj.spans[op.key]
+              && st.end > proj.spans[op.key].end
+            return (
+              <div key={`${kind}-${st.id}`}
+                className={`bar step ${kind}${st.done ? ' done' : ''}${drags ? ' draggable' : ''}${liveStep ? ' dragging' : ''}`}
+                onPointerDown={drags ? (e) => down(e, 'step', op.key, st.id) : undefined}
+                onPointerMove={drags ? move : undefined}
+                onPointerUp={drags ? up : undefined}
+                onPointerCancel={drags ? up : undefined}
+                title={`${kind === 'splan' ? 'Planned' : 'Projected'} ${op.label.toLowerCase()} — ${st.name || 'unnamed step'}`
+                  + `: ${st.days} d, ${fmt(st.start)} – ${fmt(st.end)}`
+                  + `, starts on day ${st.offset + 1} of ${kind === 'splan' ? 'the station' : 'the work left'}`
+                  + (waits ? `, after ${waits} other${waits === 1 ? '' : 's'}` : ', with the station')
+                  + (st.lag ? `, held back ${st.lag} d` : '')
+                  + (st.done ? ' (done)' : '')
+                  + (past ? '. Runs past the days left on the station — tick off what is done, or change the days left' : '')
+                  + (drags ? '. Drag to hold it back, drag an edge to change its days.' : '')}
+                style={{ left: x + 1, width: w - 3, top: top + lane.get(st.id) * STEP_LANE,
+                  ...(plan
+                    ? { background: op.color, borderColor: op.light, color: '#FFF' }
+                    : { background: op.light, borderColor: op.color, color: op.color }) }}>
+                {drags && <><span className="grip l" /><span className="grip r" /></>}
+                <span>{st.name || '—'}</span>
+              </div>
+            )
+          })))}
         <div className="delmark" style={{ left: dayIndex(j.delivery) * COL + COL / 2 }} />
       </div>
     </>

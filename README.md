@@ -200,6 +200,30 @@ On the board, a unit with steps gets a ▸ beside its work-order number. Expande
 across their station's block, spread over as many lines as it takes for none to sit on top of
 another — so work that runs side by side is drawn side by side, and the row grows to fit.
 
+**The steps are drawn twice, once against each station bar**, so a unit's pieces of work read the
+way its stations do. The upper block sits under the planned bars and is filled solid: the plan, step
+by step, measured from each station's planned start. The lower block sits under the projections and
+is drawn outlined: where each piece of work is actually expected to land, measured from each
+station's projected start. A row therefore splits into a plan half and a projection half, and the
+gap between a step in one and the same step in the other is how far that piece of work has moved.
+
+Three things follow from what the lower block is:
+
+- **A step already ticked off does not appear in the projection.** It is not work still to come. It
+  stays in the plan block above, struck through and outlined, where it belongs to the record rather
+  than to the forecast. For the station in progress this is what makes the block read correctly:
+  what is left of it runs from where the projection puts it.
+- **A station with nothing left to project has no lower block** — one the unit has already passed,
+  a finished unit, or a running station with no days left. The plan block is still drawn.
+- **On the station in progress the two blocks can disagree in length.** Its projected bar is as long
+  as the days the shop says are left; its steps are as long as the longest chain through whatever
+  has not been ticked off. When the steps run longer the block overhangs its bar, and the step that
+  overhangs says so when you hover it. Everywhere else the two end on the same day.
+
+**Only the plan block is dragged.** A step's lag and its length are counted from its station's
+planned start, so that is the bar the gesture belongs to; the projection block is where the answer
+lands and has nowhere to write.
+
 Two consequences worth knowing:
 
 - A station built from steps **cannot be stretched by dragging its edge**, because its length comes
