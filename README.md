@@ -42,7 +42,8 @@ acts on old state, which reads as a race rather than as the bug it is.
 
 ## Board and table
 
-Two views of the same plan, switched from the header.
+Two of the four views of the same plan — the [calendar](#the-calendar) and the
+[foremen's due dates](#due-dates-for-the-foremen) are the other two — all switched from the header.
 
 **Board** is the Gantt: bars per operation, the day axis, station load, and the day toggles.
 
@@ -113,6 +114,32 @@ would bury the one that matters. A delivery landing on a shaded day is worth a s
 The header counts the month's deliveries and how many of them the projection says will miss. With no
 deliveries in the month being viewed it says where the work actually is, so an empty grid doesn't
 read as a broken one.
+
+### Due dates for the foremen
+
+The **Foremen** view is the same plan cut the way a station runs it: one section for fabrication,
+one for paint, one for final assembly, each listing the units that station still has to touch.
+
+Every row carries both dates, side by side. **Due** is the planned finish — the latest that station
+could be done and still make the delivery date, capacity aside — and it moves when a delivery date,
+a day count or the shop calendar changes, but not when levelling is switched on or off. The
+projected start and finish are where the work is actually tracking, carried forward from what is on
+the floor today. **Against plan** is the gap between them in working days, and it is the reason the
+page shows both: a foreman handed only the plan cannot see that the unit in front of him is already
+a week over, and one handed only the projection cannot see that it was ever meant to be anywhere
+else.
+
+A station the unit has already passed shows the day it went in and the day it was closed instead of
+a projection. Where it was closed before the dates were being kept it shows nothing at all — a
+station that ran in June would otherwise borrow a projection reading October. Those stations are
+hidden by default, since the work ahead is what a foreman is being handed; **Include stations
+already finished** puts them back for anyone checking over them.
+
+Each section has its own **Download CSV**, and **Download all three** puts every station in one
+file with a Station column. The files carry the same columns as the tables plus the unit's
+description in full, they are named for the station and the day they were taken
+(`paint-due-dates-2026-09-22.csv`), and they open straight into Excel. That is how the dates reach a
+foreman who has no login — printed for the wall, or mailed as an attachment.
 
 ### Breaking a station into steps
 

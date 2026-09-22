@@ -19,6 +19,29 @@ const fmtNum = (d) => d.toLocaleDateString('en-US', { month: '2-digit', day: '2-
 
 const underway = (j) => j.stage && j.stage !== 'none' && j.stage !== 'done'
 
+// --- CSV -------------------------------------------------------------------
+// A cell is quoted only when it has to be, so the file stays readable opened in
+// anything but a spreadsheet.
+const csvCell = (v) => {
+  const s = v === null || v === undefined ? '' : String(v)
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+// CRLF because Excel still wants it, and a leading byte-order mark because
+// without one Excel reads UTF-8 as the local codepage and mangles any accent.
+const toCsv = (head, rows) => [head, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n')
+const downloadCsv = (name, text) => {
+  const url = URL.createObjectURL(new Blob(['﻿', text], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // Revoking straight away can cancel the download in some browsers; a tick is
+  // long enough for it to have started.
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 // What a cell needs in order to show everything in it. The browser will not
 // answer this: an input is as wide as its CSS says whatever text is inside it,
 // so the text is measured directly and the boxes around it added back on.
@@ -1270,6 +1293,10 @@ export default function App() {
       onSelect={() => setSelected(selected === j.id ? null : j.id)} />
   )
 
+  // Pages that show the plan rather than let it be changed: no unit panel under
+  // them, and no part-number editor.
+  const readOnlyView = view === 'report' || view === 'foremen'
+
   return (
     <div className="shell">
       <Style />
@@ -1277,7 +1304,7 @@ export default function App() {
         <div className="title">Shop schedule <span>· scheduled backward from delivery</span></div>
         <div className="stats">
           <div className="views">
-            {['board', 'table', 'calendar', ...(trackingEnabled && SHOW_REPORT ? ['report'] : [])].map((v) => (
+            {['board', 'table', 'calendar', 'foremen', ...(trackingEnabled && SHOW_REPORT ? ['report'] : [])].map((v) => (
               <button key={v} className={view === v ? 'on' : ''}
                 onClick={() => { setView(v); setSelected(null) }}>
                 {v[0].toUpperCase() + v.slice(1)}
@@ -1416,12 +1443,15 @@ export default function App() {
         <CalendarView rows={scheduled} projById={projById} partsById={partsById} cal={cal}
           today={today} tracking={trackingEnabled} selected={selected}
           onSelect={(id) => setSelected((cur) => (cur === id ? null : id))} />
+      ) : view === 'foremen' ? (
+        <ForemenView stages={stageDateRows} jobs={units} partsById={partsById}
+          cal={cal} today={today} />
       ) : (
         <StageReport log={stageLog} jobs={jobs} partsById={partsById}
           stages={stageDateRows} datesEnabled={stageDatesEnabled} />
       )}
 
-      {view !== 'report' && (sel ? (
+      {!readOnlyView && (sel ? (
         <div className="panel">
           <h3>{sel.unit}{sel.desc ? ` — ${sel.desc}` : ''}</h3>
           <div className="field"><span>Unit</span>
@@ -1646,7 +1676,7 @@ export default function App() {
             : <span className="hint bad">Part numbers need the <code>part_numbers</code> table — see supabase/schema.sql</span>}
         </div>
       ))}
-      {showParts && partsEnabled && view !== 'report' && (
+      {showParts && partsEnabled && !readOnlyView && (
         <div className="panel wide">
           <h3>Part numbers</h3>
           <p className="sub">The standard build for each model. Picking one when you add a unit copies
@@ -2318,6 +2348,164 @@ function CalendarView({ rows, projById, partsById, cal, today, tracking, selecte
       </div>
       <p className="calfoot">Each unit sits on the date it is due out. Click one to open it below.
         Days the shop is closed are shaded — a delivery landing on one is worth a second look.</p>
+    </div>
+  )
+}
+
+// What each station still has to get out, and when. One section per shop: the
+// date the plan needs the unit out of that station, beside the date it is
+// currently tracking to. The gap between those two is the point of the page --
+// a foreman given only the plan cannot see that the unit in front of him is
+// already a week over, and a foreman given only the projection cannot see that
+// it was ever meant to be anywhere else.
+//
+// Each section downloads as its own CSV, because that is how the dates reach
+// someone who has no login: printed for the wall, or mailed as an attachment.
+function ForemenView({ stages, jobs, partsById, cal, today }) {
+  // The work ahead is what a foreman is being handed. Stations already behind
+  // the unit are still here for anyone checking back over them, just not first.
+  const [showClosed, setShowClosed] = useState(false)
+  const byJob = useMemo(() => new Map(jobs.map((j) => [j.id, j])), [jobs])
+
+  const sections = useMemo(() => {
+    // The part number is what is written on the traveller, so it leads; the
+    // unit's own description stands in where there is no part number, and rides
+    // along as the tooltip and as its own column in the CSV either way.
+    const model = (j) => {
+      const p = j && j.partId ? partsById.get(j.partId) : null
+      return (p && p.part_number) || (j && j.desc) || ''
+    }
+    return OPS.map((op) => {
+      const rows = (stages || [])
+        .filter((s) => s.key === op.key && (showClosed || s.state !== 'closed'))
+        .map((s) => {
+          const j = byJob.get(s.jobId)
+          // A station the unit has already passed has no projection, and must
+          // not borrow one: a station that ran in June would show a date in
+          // October. Closed before the dates were kept simply leaves it blank,
+          // which is the honest answer.
+          const done = s.state === 'closed'
+          const start = s.actual.start || (done ? null : s.projected && s.projected.start) || null
+          const finish = s.actual.finish || (done ? null : s.projected && s.projected.end) || null
+          const due = (s.plan && s.plan.end) || null
+          return {
+            ...s,
+            model: model(j),
+            desc: (j && j.desc) || '',
+            delivery: j ? j.delivery : null,
+            due,
+            start,
+            finish,
+            late: due && finish ? cal.workdaysBetween(due, finish) : null,
+          }
+        })
+        // Soonest first: this list is read from the top down.
+        .sort((a, b) => (a.due || a.finish || 0) - (b.due || b.finish || 0)
+          || String(a.unit).localeCompare(String(b.unit), undefined, { numeric: true }))
+      return {
+        op,
+        rows,
+        late: rows.filter((r) => r.late > 0).length,
+        now: rows.filter((r) => r.state === 'active').length,
+      }
+    })
+  }, [stages, byJob, partsById, cal, showClosed])
+
+  const STATE = { closed: 'Finished', active: 'In the shop now', pending: 'Not started' }
+  const HEAD = ['Unit', 'Model', 'Description', 'Station', 'Status', 'Planned start', 'Planned finish',
+    'Projected start', 'Projected finish', 'Working days vs plan', 'Delivery']
+  const out = (d) => (d ? fmtNum(d) : '')
+  const line = (op, r) => [r.unit, r.model, r.desc, op.label, STATE[r.state], out(r.plan && r.plan.start),
+    out(r.due), out(r.start), out(r.finish), r.late == null ? '' : r.late, out(r.delivery)]
+  const save = (secs, name) => downloadCsv(`${name}-due-dates-${isoDate(today)}.csv`,
+    toCsv(HEAD, secs.flatMap((sec) => sec.rows.map((r) => line(sec.op, r)))))
+  const slug = (op) => op.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+
+  const date = (d) => (d ? fmtNum(d) : <span className="muted">—</span>)
+  const delta = (n) => {
+    if (n == null) return <span className="muted">—</span>
+    if (n > 0) return <span className="bad">{n} d late</span>
+    if (n < 0) return <span className="good">{-n} d early</span>
+    return <span className="good">on plan</span>
+  }
+
+  const total = sections.reduce((n, s) => n + s.rows.length, 0)
+  const late = sections.reduce((n, s) => n + s.late, 0)
+
+  return (
+    <div className="reportwrap">
+      <div className="rephead">
+        <div><b>{total}</b> station{total === 1 ? '' : 's'} of work listed</div>
+        <div className={late ? 'bad' : 'good'}><b>{late}</b> projected past its planned finish</div>
+        <label className="toggle">
+          <input type="checkbox" checked={showClosed}
+            onChange={(e) => setShowClosed(e.target.checked)} />
+          Include stations already finished
+        </label>
+        <div className="repact">
+          <button className="btn" onClick={() => save(sections, 'shop')}
+            disabled={!total}>Download all three (CSV)</button>
+        </div>
+      </div>
+
+      {sections.map((sec) => (
+        <div className="repsect" key={sec.op.key}>
+          <div className="sechead">
+            <h3><span className={`chip ${sec.op.key}`}><i />{sec.op.label}</span></h3>
+            <span className="secnum">
+              {sec.rows.length} unit{sec.rows.length === 1 ? '' : 's'}
+              {sec.now ? ` · ${sec.now} in the shop now` : ''}
+              {sec.late ? <span className="bad"> · {sec.late} running late</span> : ''}
+            </span>
+            <button className="btn sm" onClick={() => save([sec], slug(sec.op))}
+              disabled={!sec.rows.length}>Download CSV</button>
+          </div>
+          {sec.rows.length === 0 ? (
+            <p className="foot">Nothing {showClosed ? 'on record' : 'left'} for {sec.op.label.toLowerCase()}.</p>
+          ) : (
+            <div className="tablescroll">
+              <table className="report duedates">
+                <thead>
+                  <tr>
+                    <th>Unit</th><th>Model</th>
+                    <th>Planned start</th>
+                    <th title="The day this station has to be finished to keep the delivery date">Due</th>
+                    <th>Projected start</th><th>Projected finish</th>
+                    <th className="r">Against plan</th>
+                    <th>Status</th><th>Delivery</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sec.rows.map((r) => (
+                    <tr key={`${r.jobId}-${r.key}`} className={r.state === 'active' ? 'onnow' : ''}>
+                      <td className="strong">{r.unit}</td>
+                      <td className={r.model ? '' : 'muted'} title={r.desc}>{r.model || '—'}</td>
+                      <td className="n">{date(r.plan && r.plan.start)}</td>
+                      <td className="n due">{date(r.due)}</td>
+                      <td className="n">{date(r.start)}</td>
+                      <td className="n">{date(r.finish)}</td>
+                      <td className="r n">{delta(r.late)}</td>
+                      <td className="muted">{STATE[r.state]}</td>
+                      <td className="n">{date(r.delivery)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ))}
+
+      <p className="foot">
+        Due is the planned finish: the latest that station could be done and still make the delivery
+        date, capacity aside. It and the planned start move when a delivery date, a day count or the
+        shop calendar changes, but not when levelling is switched on or off. Projected dates are where the work
+        is actually tracking, carried forward from what is on the floor today; a station that has
+        already run shows the day it went in and the day it was closed instead. Against plan counts
+        working days: a unit three days late out of paint is three days late into assembly unless
+        it is pulled back. Every date is as of {fmtNum(today)}, and the CSV files carry the same
+        columns as the tables.
+      </p>
     </div>
   )
 }
@@ -3046,6 +3234,18 @@ function Style() {
       border: 1px solid transparent; border-radius: 3px; background: none; padding: 2px 4px; margin: -2px -4px; }
     .dateedit:hover { border-color: #C6CDD1; background: #FFF; }
     .dateedit:focus { outline: 2px solid #44688F; outline-offset: -1px; border-color: transparent; background: #FFF; }
+    /* station due dates for the foremen */
+    .rephead .toggle { border-right: 0; padding-right: 0; }
+    .repact { margin-left: auto; display: flex; gap: 8px; }
+    .sechead { display: flex; align-items: center; gap: 12px; }
+    .sechead h3 { display: flex; align-items: center; }
+    .sechead .chip { margin-right: 0; font-size: 11px; padding: 4px 9px; }
+    .secnum { font-size: 12px; color: #7A848C; font-variant-numeric: tabular-nums; }
+    .secnum .bad { color: #B3382E; font-weight: 600; }
+    .sechead .btn { margin-left: auto; }
+    table.duedates td { padding: 7px 12px; }
+    table.duedates td.due { font-weight: 700; }
+    table.duedates tr.onnow td { background: #FBF7EF; }
     .panelsect { margin: 14px 0 4px; display: flex; flex-direction: column; gap: 7px; }
     .panelsect h4 { margin: 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #5B6670; }
     .panelsect .foot { margin: 0; font-size: 11px; color: #7A848C; line-height: 1.5; }
