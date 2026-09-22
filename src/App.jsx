@@ -743,8 +743,24 @@ export default function App() {
   }, [units, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
 
-  // Dragging the projection — the lower, solid lane. It is derived, so a drag
-  // has to land somewhere real:
+  // Would this pin actually move the projected bar it was dragged from?
+  const projectionMoves = useCallback((jobId, key, patch, span) => {
+    try {
+      const trial = units.map((u) => (u.id === jobId ? { ...u, ...patch } : u))
+      const after = projectSchedule(trial, caps, today, cal).find((p) => p.id === jobId)
+      const moved = after && after.spans[key]
+      // No span at all means the station has no work left to place; treat that
+      // as no move rather than writing a pin against nothing.
+      return Boolean(moved) && moved.start.getTime() !== span.start.getTime()
+    } catch {
+      // A calendar with nowhere to put the work cannot answer; let the pin
+      // through rather than swallowing the drag.
+      return true
+    }
+  }, [units, caps, today, cal])
+
+  // Dragging the projection — the lower, outlined lane. It is derived, so a
+  // drag has to land somewhere real:
   //
   //   a station not started yet  middle pins it, an edge sets its days
   //   the station running now    an edge sets the days the shop says are left
@@ -770,6 +786,17 @@ export default function App() {
         const built = (stepsByJob.get(jobId) || {})[key]
         if (!(built && built.length)) patch[key] = Math.max(1, days)
       }
+      // Dragging here writes a pin, and a pin means two different things to the
+      // two schedulers. The plan honours it verbatim; the projection treats it
+      // as an earliest, never booking work before today or before capacity can
+      // take it. So a pin the projection will ignore moves only the planned bar
+      // in the lane above -- the bar under the pointer springs back and the one
+      // nobody grabbed jumps to a date nobody pointed at.
+      //
+      // Rather than guess where that floor is, try the pin and look: project
+      // again with it applied and keep it only if the bar being dragged
+      // actually moved. Once per release, not per pointer move.
+      if (mode === 'move' && !projectionMoves(jobId, key, patch, span)) return
       saveJob(jobId, patch)
       return
     }
@@ -787,7 +814,7 @@ export default function App() {
     const built = (stepsByJob.get(jobId) || {})[key]
     if (built && built.length) return
     if (days !== job[key]) saveJob(jobId, { [key]: days })
-  }, [units, projById, stepsByJob, cal, pinsEnabled, saveJob])
+  }, [units, projById, stepsByJob, cal, pinsEnabled, saveJob, projectionMoves])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
   // Closed stations by unit, then by station.
@@ -2843,6 +2870,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // draws, reached from the unit's stage alone -- the board is never handed the
   // stage log.
   const rank = STAGE_RANK[j.stage || 'none'] || 0
+  // Where today sits on the track, for the floor under a projection drag.
+  const todayX = dayIndex(new Date(todayT)) * COL
   // Which stations are behind, and why, worded for the ring's tooltip. Worked
   // out once for the row rather than inside a bar map, because the mark now
   // sits on the projection lane while the dates it is measured against are the
@@ -2983,7 +3012,10 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
           const liveProj = drag && drag.lane === 'proj' && drag.key === o.key
           if (liveProj) {
-            if (drag.mode === 'move') x += snap
+            // The projection never books work before today, so the bar stops at
+            // the today line rather than following the pointer past it and
+            // springing back on release.
+            if (drag.mode === 'move') x = Math.max(todayX, x + snap)
             else if (drag.mode === 'end') w = Math.max(COL, w + snap)
             else { const d = Math.min(snap, w - COL); x += d; w -= d }
           }
