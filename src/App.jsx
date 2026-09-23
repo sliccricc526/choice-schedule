@@ -747,9 +747,10 @@ export default function App() {
     return m
   }, [steps])
 
-  // A station with steps takes as long as the longest chain through them —
-  // work that runs side by side is planned side by side, so the station is its
-  // critical path and not the sum of its parts. The typed day count on the unit
+  // A station with steps takes as long as the window its steps occupy — work
+  // that runs side by side is planned side by side, so the station is its
+  // critical path and not the sum of its parts, and a step brought forward
+  // past the station's own origin widens it rather than being clipped. The typed day count on the unit
   // stays untouched underneath and comes back the moment the last step is
   // deleted, so breaking a station down is never destructive.
   //
@@ -931,20 +932,21 @@ export default function App() {
       return
     }
 
-    // Where the drag wants the step to start, as a working-day offset from the
-    // station, and what that means as a wait beyond its prerequisites.
+    // Where the drag wants the step to start, and what that means as a wait
+    // beyond its prerequisites. The station's first day is the window's left
+    // edge, so the working days counted from it are measured from `origin`; add
+    // that back to get the offset the lag is expressed in. Neither end is
+    // clamped: a step dragged before the station's origin takes a negative lag
+    // and the station grows leftward to cover it, which is the whole point.
     const plan = stepPlan(view)
     const from = onWork(addDays(span.start, deltaDays))
-    const offset = Math.max(0, cal.workdaysBetween(stationStart, from))
-    const lag = Math.max(0, offset - (plan.earliest.get(stepId) || 0))
+    const offset = cal.workdaysBetween(stationStart, from) + plan.origin
+    const lag = offset - (plan.earliest.get(stepId) || 0)
     if (mode === 'start') {
       // The left edge moves the start and keeps the finish, so it is a resize
       // as well as a wait. Measure the new length from where the step will
-      // actually land, not from where the pointer was: dragging the left edge
-      // past the earliest the step could start pins the lag at 0, and reading
-      // the raw pointer date there grew the bar at its right end instead --
-      // a left-edge drag lengthening the bar the wrong way. Laying the step out
-      // again with the lag the drag settled on is the same code that draws it.
+      // actually land rather than from where the pointer was, by laying it out
+      // again with the lag the drag settled on -- the same code that draws it.
       const settled = stepSpans(stationStart,
         view.map((x) => (x.id === stepId ? { ...x, lag } : x)), cal)
       const at = (settled.find((x) => x.id === stepId) || span).start
@@ -1781,7 +1783,7 @@ export default function App() {
                       <span className={`chip ${o.key}`}><i />{o.label}</span>
                       <span className="muted">{list.length
                         ? `${list.filter((x) => x.done).length} of ${list.length} done · ${sel[o.key]} d`
-                          + (plan.length < list.reduce((n, x) => n + x.days, 0) ? ' (longest chain)' : '')
+                          + (plan.length < list.reduce((n, x) => n + x.days, 0) ? ' (the span they cover)' : '')
                         : `${sel[o.key]} d, not broken down`}</span>
                       <button className="btn sm" onClick={() => addStep(sel, o.key)}>Add step</button>
                     </div>
@@ -3311,8 +3313,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
               + (pinned ? ' — placed by hand' : '')
               + (built ? (steps[o.key].length === 1
-                  ? `. 1 step, ${j[o.key]} days — edit it to change the station's length`
-                  : `. ${steps[o.key].length} steps add up to ${j[o.key]} days — edit them to change the station's length`) : '')
+                  ? `. 1 step, spanning ${j[o.key]} days — edit it to change the station's length`
+                  : `. ${steps[o.key].length} steps spanning ${j[o.key]} days — edit them to change the station's length`) : '')
               + (onDragStage ? '. Drag to move it.' : '')}
             style={{ left: x + 1, width: w - 3, background: o.color, borderColor: o.light, color: o.light }}>
             {onDragStage && !built && <><span className="grip l" /><span className="grip r" /></>}
@@ -3430,7 +3432,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                     : st.offset < 0 ? `, ${-st.offset} working day${st.offset === -1 ? '' : 's'} before the work left was due to start`
                     : `, starts on day ${st.offset + 1} of the work left`)
                   + (waits ? `, after ${waits} other${waits === 1 ? '' : 's'}` : ', with the station')
-                  + (st.lag ? `, held back ${st.lag} d` : '')
+                  + (st.lag > 0 ? `, held back ${st.lag} d`
+                    : st.lag < 0 ? `, brought forward ${-st.lag} d` : '')
                   + (st.done ? ' (done)' : '')
                   + (recorded ? `. Recorded${st.fixed ? ` as running from ${fmt(st.start)}` : ''}`
                     + `${st.actualDays != null ? `${st.fixed ? ', ' : ' as '}taking ${st.actualDays} d` : ''}`

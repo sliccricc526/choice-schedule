@@ -105,10 +105,18 @@ export function stepDependsOn(steps, aId, bId) {
 // start, taken as the longest path through what each one waits on. The station
 // is as long as the furthest any step reaches — its critical path.
 //
-// `lag` holds a step back beyond that: the shop knows the paint has to sit two
-// days before the next man can touch it, or simply wants the work later than it
-// strictly could be. `earliest` is where the step could start with no lag, which
-// is what a drag needs in order to work out the lag it is asking for.
+// `lag` moves a step off that: positive holds it back -- the shop knows the paint
+// has to sit two days before the next man can touch it -- and negative brings it
+// forward, overlapping what it waits on, or starting before the station's own
+// origin for a step that waits on nothing. `earliest` is where the step could
+// start with no lag at all, which is what a drag needs in order to work out the
+// lag it is asking for, and it is never negative: it is a path length.
+//
+// Because a step may now sit before offset zero, the station is the **window its
+// steps occupy** rather than a count from zero. `origin` is that window's left
+// edge and `length` its width, so a station broken into steps is exactly as long
+// as the work in it -- with no dead days at the front, which a station whose
+// steps all carried a lag used to have.
 export function stepPlan(steps) {
   const list = steps || []
   const byId = new Map(list.map((s) => [s.id, s]))
@@ -131,13 +139,19 @@ export function stepPlan(steps) {
     })
     state.set(s.id, 2)
     earliest.set(s.id, at)
-    offset.set(s.id, at + Math.max(0, s.lag || 0))
+    offset.set(s.id, at + (s.lag || 0))
     return offset.get(s.id)
   }
   list.forEach(visit)
-  const length = list.reduce(
-    (n, s) => Math.max(n, (offset.get(s.id) || 0) + Math.max(1, s.days || 1)), 0)
-  return { offset, earliest, length: Math.max(1, length), cycle }
+  // The window's left edge is the first step, wherever that is -- not day zero.
+  // A station whose steps are every one of them held back starts when the first
+  // of them starts, rather than carrying dead days at the front that no work
+  // occupies.
+  const origin = list.length
+    ? list.reduce((n, s) => Math.min(n, offset.get(s.id) || 0), Infinity) : 0
+  const to = list.reduce(
+    (n, s) => Math.max(n, (offset.get(s.id) || 0) + Math.max(1, s.days || 1)), origin)
+  return { offset, earliest, origin, length: Math.max(1, to - origin), cycle }
 }
 
 // Each step's own dates. Steps that overlap in time get overlapping spans --
@@ -145,11 +159,15 @@ export function stepPlan(steps) {
 export function stepSpans(start, steps, cal = defaultCalendar) {
   const plan = stepPlan(steps)
   const base = cal.isWorkday(start) ? strip(start) : cal.nextWorkday(start)
+  // The chain runs from the window's left edge, not from offset zero, so the
+  // first day of the station is the first day of work in it however far back a
+  // step has been brought. Offsets are handed out measured from that edge, so
+  // they stay at or above zero for the lanes and for "day N of the station".
   const days = [base]
   for (let i = 1; i < plan.length; i++) days.push(cal.nextWorkday(days[i - 1]))
   const at = (i) => days[Math.max(0, Math.min(days.length - 1, i))]
   return (steps || []).map((s) => {
-    const o = plan.offset.get(s.id) || 0
+    const o = (plan.offset.get(s.id) || 0) - plan.origin
     return { ...s, offset: o, start: at(o), end: at(o + Math.max(1, s.days || 1) - 1) }
   })
 }
@@ -195,7 +213,12 @@ export function stepActualSpans(start, steps, cal = defaultCalendar) {
   // runs for every open row on every pointermove of a drag, so the settled
   // results are kept: a diamond of `needs` would otherwise be walked twice for
   // every branch that reaches it.
-  const on = (from, n) => { let d = strip(from); for (let i = 0; i < n; i++) d = cal.nextWorkday(d); return d }
+  // Signed, so a step brought forward walks back down the calendar.
+  const on = (from, n) => {
+    let d = strip(from)
+    for (let i = 0; i < Math.abs(n); i++) d = n < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d)
+    return d
+  }
   const span = new Map()
   const state = new Map()            // 1 = being visited, 2 = settled
   let cycle = false
@@ -219,7 +242,13 @@ export function stepActualSpans(start, steps, cal = defaultCalendar) {
         const after = cal.nextWorkday(sp.end)
         if (after > from) from = after
       })
-      from = on(from, Math.max(0, s.lag || 0))
+      from = on(from, s.lag || 0)
+      // A step brought forward cannot be brought forward past the day the
+      // station's remaining work begins. The plan may say the neck starts four
+      // days before the frame is done; the projection is what is still to do,
+      // and none of it happens in the past. A step with a recorded date is the
+      // exception and keeps it -- that is the shop reporting it already ran.
+      if (from < base) from = base
     } else {
       from = cal.isWorkday(s.actualStart) ? strip(s.actualStart) : cal.nextWorkday(s.actualStart)
     }

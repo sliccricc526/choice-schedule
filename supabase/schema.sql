@@ -121,15 +121,24 @@ create table if not exists public.job_steps (
   -- The steps this one waits on, by id, within the same unit and station.
   -- Empty means it can start as soon as the station does.
   needs uuid[] not null default '{}',
-  -- Working days to hold the step back beyond what it waits on: paint has to
-  -- sit before the next man can touch it, or the shop simply wants the work
-  -- later than it strictly could be. Set by dragging the step on the board.
-  lag int not null default 0 check (lag >= 0),
+  -- Working days to move the step off where its prerequisites leave it. Positive
+  -- holds it back -- paint has to sit before the next man can touch it, or the
+  -- shop simply wants the work later than it strictly could be. Negative brings
+  -- it forward, overlapping what it waits on, or starting before the station's
+  -- own origin for a step that waits on nothing. A station is the window its
+  -- steps occupy, so bringing one forward widens the station rather than
+  -- clipping the step. Set by dragging the step on the board.
+  lag int not null default 0,
   -- The order they are listed in, which is the shop's, not the database's.
   position int not null default 0,
   created_at timestamptz not null default now()
 );
 create index if not exists job_steps_job_stage on public.job_steps (job_id, stage, position);
+
+-- `lag` was once non-negative, which meant a step could never begin before its
+-- station did and a leftward drag on the board had nowhere to go. A station is
+-- the window its steps occupy, so a step brought forward widens it.
+alter table public.job_steps drop constraint if exists job_steps_lag_check;
 
 -- Where a step's work actually lands, and how long it actually takes, as
 -- against the `days` and `lag` above -- which are the plan. The board draws
