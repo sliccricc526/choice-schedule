@@ -510,6 +510,8 @@ A part number is the standard build for a trailer model — a description plus w
 
 Selecting a part number **copies** its values onto that unit rather than linking them. Editing a part number later therefore never reschedules trailers already in the shop — a deliberate choice, since a routing change shouldn't silently move work that's underway. Each unit keeps a reference to the part number it came from, so the board tags the row and the unit panel offers **Reset to standard** whenever a unit's numbers have been tuned away from the catalog's.
 
+Because the copy is one-way, a unit can quietly stop matching its own model — either because somebody tuned that unit, or because the standard moved underneath it. The table says which: any Fab, Paint or Assembly cell that no longer matches the part number's standard is **tinted**, and hovering it names the part number, what it builds to, and what this unit is set to. Change the standard in the catalog and every unit carrying that part number lights up immediately; set the unit back to the standard and the tint clears. A unit with no part number has no standard to drift from and is never marked. A station built from steps is marked on the total its steps come to, since that is the number the schedule uses.
+
 ## Access control
 
 The board is behind an email-and-password sign-in. Signing out clears what's on screen, and no data is requested until a session exists.

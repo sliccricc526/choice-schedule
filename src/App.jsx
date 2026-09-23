@@ -2205,6 +2205,14 @@ function SignIn() {
 function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
   showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns }) {
+  // The standard this unit's model builds to, for saying where the unit has
+  // drifted off it. A unit with no part number has no standard to drift from.
+  const partById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
+  const partOf = (j) => (j.partId ? partById.get(j.partId) : null) || {}
+  const partStd = (j, key) => {
+    const v = partOf(j)[`${key}_days`]
+    return v == null ? null : v
+  }
   // Which column is being dragged, and which one the pointer is over. Transient
   // -- where the columns end up is the caller's to keep.
   const [dragCol, setDragCol] = useState(null)
@@ -2365,11 +2373,22 @@ function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApp
       key: o.key, label: SHORT[o.key], cls: 'w-num',
       cell: ({ j, st }) => {
         const built = Boolean(st && st[o.key].length)
+        // Editing a part number never reschedules the units already carrying it
+        // -- that is deliberate, so a standard can be corrected without moving
+        // work that is already booked. The cost is that a unit quietly stops
+        // matching its own model, so say which station it is and what the
+        // standard says. Shown against the number that drifted rather than as a
+        // flag on the row, because it is the number that is the answer.
+        const std = partStd(j, o.key)
+        const off = std != null && std !== j[o.key]
+        const tip = !off ? (built ? "Built from this station's steps" : undefined)
+          : `${partOf(j).part_number} builds this in ${std} d — this unit is set to ${j[o.key]}`
+            + (built ? ', from its steps' : '')
         return (
-          <td key={o.key}>
+          <td key={o.key} className={off ? 'drift' : undefined} title={tip}>
             {/* built from steps: the number is the longest chain, not something to type */}
             {built
-              ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
+              ? <span className="calc built" title={tip}>{j[o.key]}</span>
               : <input type="number" min="1" value={j[o.key]}
                   onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
           </td>
@@ -4041,6 +4060,12 @@ function Style() {
     .btn.sm { padding: 5px 10px; font-size: 12px; }
     .pntag { display: inline-block; font-size: 10px; font-weight: 700; color: #44688F; background: #E3EAF2; border-radius: 3px; padding: 1px 5px; margin-right: 6px; }
     .field select { font-family: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid #C6CDD1; border-radius: 4px; width: 160px; }
+    /* A station no longer built to its part number's standard. The same warm
+       tone the unit panel uses to say the same thing, kept faint because it
+       marks a difference worth seeing rather than a problem. */
+    .orders td.drift { background: #FBF0E4; box-shadow: inset 0 0 0 1px #E6CBA6; }
+    .orders td.drift input { background: transparent; font-weight: 700; color: #7A4A16; }
+    .orders td.drift .calc { font-weight: 700; color: #7A4A16; }
     .driftline { font-size: 12px; background: #F5E8DA; color: #7A4A16; border-radius: 4px; padding: 9px 12px; margin: 12px 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; line-height: 1.4; }
     .addrow select { font-family: inherit; font-size: 13px; padding: 7px 8px; border: 1px solid #C6CDD1; border-radius: 4px; max-width: 320px; }
     .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 13px; }
