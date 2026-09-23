@@ -258,6 +258,20 @@ export function stepLanes(spans) {
 export const pinOf = (job, key) => (job.pins && job.pins[key]) || null
 export const hasPins = (job) => OPS.some((o) => pinOf(job, o.key))
 
+// --- Stations placed by what actually happened -----------------------------
+// A pin is a plan instruction: the scheduler stops choosing that stage's dates
+// and works the rest of the shop around it. These are the other thing -- what
+// the floor reports. The projection reads them; neither planner does, which is
+// the whole point: recording progress must not re-date what the customer was
+// quoted. Where a station has both, the recorded fact wins in the projection,
+// because a pin is a wish and this is a measurement.
+export const actualOf = (job, key) => (job.actuals && job.actuals[key]) || null
+export const actualDaysOf = (job, key) => {
+  const v = job.actualDays && job.actualDays[key]
+  return v == null ? null : v
+}
+export const hasActuals = (job) => OPS.some((o) => actualOf(job, o.key) || actualDaysOf(job, o.key) != null)
+
 // The block a pinned stage occupies. It runs forward from the pin, because a
 // pin says when the work starts; a pin dropped on a closed day takes the next
 // working one, since nothing runs on a day the shop is shut.
@@ -491,7 +505,11 @@ export function remainingWork(job, today, cal = defaultCalendar) {
   const out = []
   OPS.forEach((op, i) => {
     if (i < at) return
-    const days = i === at ? daysToGo(job, today, cal) : Math.max(1, job[op.key] || 1)
+    // The station under way reports what is left of it; one still ahead runs
+    // for however long the shop says it really takes, or for its booked days
+    // when nobody has said otherwise.
+    const days = i === at ? daysToGo(job, today, cal)
+      : Math.max(1, actualDaysOf(job, op.key) == null ? (job[op.key] || 1) : actualDaysOf(job, op.key))
     if (days > 0) out.push({ key: op.key, days })
   })
   return out
@@ -622,17 +640,30 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
       // happening. The overload is real and stays visible in the bars
       // themselves; the load rows under the board count the plan, not the floor.
       const running = i === 0 && key === job.stage
+      // Where the shop says this station really goes. A recorded date is a
+      // measurement, not a request, so it is taken exactly: capacity is claimed
+      // by it but does not get to move it, the same way a trailer already in the
+      // bay does not get moved. It also beats a pin, which is only ever a wish
+      // about the plan.
+      const actual = actualOf(job, key)
       // A stage pinned to a date does not begin before it, even where the floor
       // happens to be clear sooner — otherwise the plan says one thing and the
       // projection beside it says another. The station already under way is
-      // exempt: it is running, whatever date was once pinned to it.
-      const pin = running ? null : pinOf(job, key)
-      const earliest = pin && strip(pin) > cursor ? strip(pin) : cursor
-      const blk = running ? runFrom(earliest, days) : forwardBlock(key, days, earliest)
+      // exempt: it is running, whatever date was once pinned to it, and so is
+      // one the floor has reported on.
+      const pin = running || actual ? null : pinOf(job, key)
+      const fixed = running || Boolean(actual)
+      const earliest = actual ? strip(actual)
+        : pin && strip(pin) > cursor ? strip(pin) : cursor
+      const blk = fixed ? runFrom(earliest, days) : forwardBlock(key, days, earliest)
       spans[key] = blk
       // Claimed either way, so an overrun station still reports its overload.
       take(key, blk.start, blk.end)
-      cursor = cal.nextWorkday(blk.end)
+      // Never backwards. A recorded date may sit in the past -- that is how the
+      // shop says a station ran early -- and the stations behind it still have
+      // not happened, so they must not be dragged back there with it.
+      const next = cal.nextWorkday(blk.end)
+      if (next > cursor) cursor = next
       end = blk.end
     })
     const complete = work.length === 0

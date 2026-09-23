@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without `actual_start` and `actual_days` on `job_steps` the board draws both step blocks as before and a projected step simply doesn't drag. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without `actual_start` and `actual_days` on `job_steps`, or the matching `*_actual_start` and `*_actual_days` on `jobs`, the board draws both lanes as before and the projected bars simply don't drag; it says which columns are missing. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -172,23 +172,26 @@ name, station, days, the dates it runs between, and what it waits for — the wa
 A step's row spans the table rather than lining up with the columns above it, because the Unit
 column is 130px of work-order number and the columns beside it mean something else entirely.
 
-The projection — the lower, outlined lane — drags too, and what it writes depends on the station:
+The projection — the lower, outlined lane — drags too, and it writes something different in kind.
+**The planned bar is the promise; the projected bar is what is actually happening.** So a drag on the
+lower bar reports a fact, and the planned bar above it does not move:
 
-- **A station not started yet** takes the same two gestures as its plan bar: the middle places it,
-  an edge sets its days.
-- **The station a unit is standing in** is running, so it cannot be moved — its work is happening
-  now, and a bar saying otherwise would be the board disagreeing with the shop floor. Its right edge
-  sets the **days left**, which until now could only be typed in the table or the panel.
+- **The middle** says when this station really goes. The projection takes the date exactly — capacity
+  is counted against it but does not get to move it, the same way a trailer already in the bay does
+  not get moved. It may sit in the past, which is how you say a station ran early.
+- **An edge** says how long it really takes. On the station a unit is standing in that is the **days
+  left**, which is its own stored figure; on one still ahead it is a recorded length of its own.
 
-**Dragging a projection to the left stops at today**, the same way a step stops at the earliest it
-could start. The projection never books work in the past, so there is nothing earlier to drag it
-to. The limit is worth stating because moving either lane writes the same thing — a pin — and a pin
-means two different things to the two schedulers: the plan takes it literally, while the projection
-treats it as an earliest and ignores anything before today or before capacity can take the work. A
-pin the projection ignores would move only the planned bar above, so the bar under the pointer
-would spring back while the one nobody grabbed jumped. Instead the drag is tried against the
-projection first and kept only if it actually moves the bar it came from. A stage already pinned
-late can still be dragged back earlier, because that does move it.
+A station you have reported on carries a dot, and the unit's panel lists them with an × to hand each
+one back to the projection. `Ctrl`+`Z` undoes that as it undoes a drag.
+
+This is not the same as **placing a stage by hand**, which is what dragging the *planned* bar does.
+That writes a pin: an instruction the backward schedule honours verbatim, so it re-dates the whole
+unit. The two used to share one column, and it went wrong in both directions — recording where work
+really landed moved the dates the customer was quoted, and because the projection treated a pin only
+as an *earliest*, a drag to a date it would ignore moved the planned bar alone while the bar under
+the pointer sprang back. They are separate columns now. Where a station has both, the projection
+takes the recorded fact and the plan keeps its pin: a pin is a wish, and this is a measurement.
 
 Step bars take the same two gestures the station bars do. **Drag an edge** to change how long a step
 takes. **Drag the middle** to hold it back: a step has no start date of its own, so moving one sets
