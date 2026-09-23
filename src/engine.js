@@ -198,6 +198,15 @@ export function stepSpans(start, steps, cal = defaultCalendar) {
 // not the edge, and is simply no link. A step reached while it is still being
 // visited is waiting on itself; it contributes nothing, which lands it on the
 // station's own start, the same answer stepPlan gives.
+// A date moved `n` working days, either way. Closed days do not count towards
+// the move and a move never lands on one, so shifting back by what you shifted
+// forward returns the day you started from.
+export function shiftWorkdays(cal, from, n) {
+  let d = strip(from)
+  for (let i = 0; i < Math.abs(n); i++) d = n < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d)
+  return d
+}
+
 // Which of a station's steps the projection carries: work still to come, plus
 // anything the shop has reported on, because a recorded fact is worth drawing
 // wherever it landed. Defined once so the bars, the drag and the station length
@@ -213,12 +222,7 @@ export function stepActualSpans(start, steps, cal = defaultCalendar) {
   // runs for every open row on every pointermove of a drag, so the settled
   // results are kept: a diamond of `needs` would otherwise be walked twice for
   // every branch that reaches it.
-  // Signed, so a step brought forward walks back down the calendar.
-  const on = (from, n) => {
-    let d = strip(from)
-    for (let i = 0; i < Math.abs(n); i++) d = n < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d)
-    return d
-  }
+  const on = (from, n) => shiftWorkdays(cal, from, n)
   const span = new Map()
   const state = new Map()            // 1 = being visited, 2 = settled
   let cycle = false

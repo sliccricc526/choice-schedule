@@ -250,7 +250,23 @@ block is what the customer was promised and what the shop intends to do: a step'
 actually being made: where a piece of work really lands and how long it really takes.
 
 So dragging a **planned** step sets its wait or its length, as it always has, and the projection
-follows because it is derived from the plan. Dragging a **projected** step records a date and a
+follows — because it is derived from the plan, wherever nothing has been recorded against it.
+
+**Where something has been recorded, the board asks.** A recorded date is a fact and stops following
+the plan, so when a plan edit makes a station longer or shorter the board cannot know whether those
+days belong to the floor as well. It says so, and waits:
+
+> **1002 — planned fabrication grew 2 days.** Move the projection out by 2 too? **[Add 2 d]** **[Leave it]**
+
+**Add** applies the change where you made it — a longer step becomes a longer step, not a step that
+starts later — and then slides everything recorded behind it by the same number of working days:
+later steps in that station, and every station after. It is one entry on the undo stack, so `Ctrl`+`Z`
+puts the whole lot back in one press. **Leave it** writes nothing, because a recorded date already
+holds where it is.
+
+Nothing is asked when the projection is wholly derived — there is no second answer to give. The
+question comes from any route into the plan, a board drag and a typed day count alike, and only when
+the length actually changed: moving a bar without resizing it raises nothing. Dragging a **projected** step records a date and a
 duration against that step alone — and the planned bars above it do not move, at all. That is the
 whole point of the split: step waits feed the station's critical path, and the plan is scheduled
 backward from delivery, so a longer station starts *earlier*. Writing the floor's progress into the
@@ -493,6 +509,8 @@ Tracking degrades gracefully: without the `stage` columns on `jobs`, the board r
 A part number is the standard build for a trailer model — a description plus working days for fabrication, paint and final assembly. **Edit part numbers** under the board opens the catalog; **Add unit** lets you start a new build from one instead of from blanks.
 
 Selecting a part number **copies** its values onto that unit rather than linking them. Editing a part number later therefore never reschedules trailers already in the shop — a deliberate choice, since a routing change shouldn't silently move work that's underway. Each unit keeps a reference to the part number it came from, so the board tags the row and the unit panel offers **Reset to standard** whenever a unit's numbers have been tuned away from the catalog's.
+
+Because the copy is one-way, a unit can quietly stop matching its own model — either because somebody tuned that unit, or because the standard moved underneath it. The table says which: any Fab, Paint or Assembly cell that no longer matches the part number's standard is **tinted**, and hovering it names the part number, what it builds to, and what this unit is set to. Change the standard in the catalog and every unit carrying that part number lights up immediately; set the unit back to the standard and the tint clears. A unit with no part number has no standard to drift from and is never marked. A station built from steps is marked on the total its steps come to, since that is the number the schedule uses.
 
 ## Access control
 

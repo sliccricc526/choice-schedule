@@ -4,11 +4,17 @@ import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, daysToGo, runFromDaysToGo,
   STAGE_LABEL, STAGE_RANK, stageDates,
-  workdaysInclusive, hasPins, hasActuals, stepPlan, stepSpans, stepActualSpans, projectedSteps, stepLanes, stepDependsOn, stageOverdue,
+  workdaysInclusive, hasPins, hasActuals, actualOf, actualDaysOf, shiftWorkdays,
+  stepPlan, stepSpans, stepActualSpans, projectedSteps, stepLanes, stepDependsOn, stageOverdue,
   PRIORITY_DEFAULT, PRIORITY_MAX,
 } from './engine.js'
 
 const COL = 26
+// The fields that can move a planned bar. `done` and `name` cannot, and neither
+// can a unit's number or any of its tracking columns, so those go through
+// without arming the plan watch.
+const PLAN_JOB_KEYS = ['fab', 'paint', 'asm', 'delivery', 'pins']
+const PLAN_STEP_KEYS = ['days', 'lag', 'needs']
 // Where a drag lands, snapped onto a working day. Never past the pointer: the
 // board draws Saturdays and Sundays, and rounding a drop that fell on one
 // *forward* threw the bar three columns for a one-column drag -- grab a bar on
@@ -374,13 +380,44 @@ export default function App() {
     if (e) { setError(e.message); load() }
   }, [load])
 
+  // --- Carrying a plan change into the projection -------------------------
+  //
+  // The projection is derived from the plan, so a plan edit flows into it -- a
+  // station held three days longer finishes three days later, and everything
+  // behind it slips. That is right until a piece of the projection has been
+  // *recorded*, because a recorded date is a fact and stops following. Then the
+  // board cannot know whether the three days belong to it too, so it asks.
+  //
+  // Detected rather than wired into each of the dozen places the plan can be
+  // edited: every one of them goes through saveJob or saveStep and shows up as
+  // a change in `scheduled`. The writers arm a snapshot when the patch could
+  // change timing, and an effect below compares. Arming explicitly, rather than
+  // watching `scheduled` all the time, is what keeps it quiet on the first load
+  // and on somebody else's edit arriving over realtime.
+  const planWatch = useRef(null)
+  // Declared up here because the plan watch needs them; each is assigned every
+  // render further down, beside the values it mirrors.
+  const scheduledRef = useRef([])
+  const jobsRef = useRef([])
+  const stepsRef = useRef([])
+  const spanDays = useCallback((sp) => (sp ? workdaysInclusive(sp.start, sp.end, cal) : 0), [cal])
+  const armPlanWatch = useCallback((jobId, edit) => {
+    const j = scheduledRef.current.find((x) => x.id === jobId)
+    if (!j) return
+    planWatch.current = {
+      jobId, edit, was: OPS.reduce((m, o) => ({ ...m, [o.key]: spanDays(j.spans[o.key]) }), {}),
+    }
+  }, [spanDays])
   const saveJob = useCallback((id, patch) => {
+    if (PLAN_JOB_KEYS.some((k) => patch[k] !== undefined)) {
+      armPlanWatch(id, { kind: 'job', field: OPS.map((o) => o.key).find((k) => patch[k] !== undefined) })
+    }
     setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)))
     if (!queuedJobs.current.has(id)) pendingWrites.current += 1
     queuedJobs.current.set(id, { ...(queuedJobs.current.get(id) || {}), ...patch })
     clearTimeout(jobTimers.current.get(id))
     jobTimers.current.set(id, setTimeout(() => flushJob(id), SAVE_AFTER))
-  }, [flushJob])
+  }, [flushJob, armPlanWatch])
   const addJob = async () => {
     const p = parts.find((x) => x.id === addPart)
     const row = {
@@ -443,12 +480,16 @@ export default function App() {
     if (e) { setError(e.message); load() }
   }, [load])
   const saveStep = useCallback((id, patch) => {
+    if (PLAN_STEP_KEYS.some((k) => patch[k] !== undefined)) {
+      const row = stepsRef.current.find((r) => r.id === id)
+      if (row) armPlanWatch(row.job_id, { kind: 'step', id, field: PLAN_STEP_KEYS.find((k) => patch[k] !== undefined) })
+    }
     setSteps((ls) => ls.map((r) => (r.id === id ? { ...r, ...patch } : r)))
     if (!queuedSteps.current.has(id)) pendingWrites.current += 1
     queuedSteps.current.set(id, { ...(queuedSteps.current.get(id) || {}), ...patch })
     clearTimeout(stepTimers.current.get(id))
     stepTimers.current.set(id, setTimeout(() => flushStep(id), SAVE_AFTER))
-  }, [flushStep])
+  }, [flushStep, armPlanWatch])
 
   // --- Undo, for drags on the board ---------------------------------------
   //
@@ -478,8 +519,6 @@ export default function App() {
   // The values a patch is about to overwrite, read from the same rows the save
   // writes to -- `jobs` and `steps`, not the derived `units`, whose day counts
   // are recomputed from steps and would restore a number nobody stored.
-  const jobsRef = useRef(jobs)
-  const stepsRef = useRef(steps)
   jobsRef.current = jobs
   stepsRef.current = steps
   const priorValues = useCallback((kind, id, patch) => {
@@ -497,14 +536,26 @@ export default function App() {
   // Save, remembering what was there. Everything a drag writes goes through
   // this; nothing else does, because every other edit on the board is a field
   // you can simply type back.
-  const saveDrag = useCallback((kind, id, patch, label) => {
-    const values = priorValues(kind, id, patch)
-    if (values) {
-      setUndoStack((st) => [...st, { kind, id, values, label }].slice(-UNDO_MAX))
+  //
+  // An entry holds a *list* of rows, because one answer can move several: say
+  // yes to carrying a plan change into the projection and it writes the step
+  // that changed plus every recorded date behind it. One gesture, one entry,
+  // one press of Ctrl+Z. A single row is the same thing with one element, so
+  // every caller that writes one row passes it the way it always has.
+  const saveRows = useCallback((rows, label) => {
+    const kept = rows
+      .map((r) => ({ ...r, values: priorValues(r.kind, r.id, r.patch) }))
+      .filter((r) => r.values)
+    if (kept.length) {
+      setUndoStack((st) => [...st, {
+        rows: kept.map(({ kind, id, values }) => ({ kind, id, values })), label,
+      }].slice(-UNDO_MAX))
       setRedoStack([])
     }
-    write(kind, id, patch)
+    rows.forEach((r) => write(r.kind, r.id, r.patch))
   }, [priorValues, write])
+  const saveDrag = useCallback((kind, id, patch, label) =>
+    saveRows([{ kind, id, patch }], label), [saveRows])
 
   // Undo and redo are the same move in opposite directions: pop an entry, keep
   // what it is about to overwrite for the other stack, write it back.
@@ -512,12 +563,17 @@ export default function App() {
     const entry = from[from.length - 1]
     if (!entry) { say(`Nothing to ${verb}`); return }
     setFrom((st) => st.slice(0, -1))
-    const values = priorValues(entry.kind, entry.id, entry.values)
-    // The row went away -- removed here or by somebody else. Drop the entry
-    // rather than resurrecting a value onto nothing.
-    if (!values) { say(`Could not ${verb}: that has been removed`); return }
-    setTo((st) => [...st, { ...entry, values }].slice(-UNDO_MAX))
-    write(entry.kind, entry.id, entry.values)
+    const back = entry.rows
+      .map((r) => ({ ...r, values: priorValues(r.kind, r.id, r.values) }))
+      .filter((r) => r.values)
+    // Every row went away -- removed here or by somebody else. Drop the entry
+    // rather than resurrecting values onto nothing. Some of them going is
+    // survivable: put back what is still there.
+    if (!back.length) { say(`Could not ${verb}: that has been removed`); return }
+    setTo((st) => [...st, {
+      rows: back.map(({ kind, id, values }) => ({ kind, id, values })), label: entry.label,
+    }].slice(-UNDO_MAX))
+    entry.rows.forEach((r) => write(r.kind, r.id, r.values))
     say(`${verb === 'undo' ? 'Undid' : 'Redid'} — ${entry.label}`)
   }, [priorValues, write, say])
   const undo = useCallback(() => step(undoStack, setUndoStack, setRedoStack, 'undo'), [step, undoStack])
@@ -866,6 +922,82 @@ export default function App() {
   }, [units, caps, today, cal, stepsByJob])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
 
+  // The other half of the plan watch armed in saveJob and saveStep: the edit
+  // has landed, so compare the station spans against the snapshot. The earliest
+  // station whose length changed is the one the question is about; anything
+  // behind it moves as a consequence rather than on its own account.
+  const [ask, setAsk] = useState(null)
+  const askRef = useRef(null)
+  askRef.current = ask
+  useEffect(() => {
+    const w = planWatch.current
+    if (!w) return
+    const j = scheduled.find((x) => x.id === w.jobId)
+    if (!j) { planWatch.current = null; return }
+    const changed = OPS.map((o) => ({ key: o.key, d: spanDays(j.spans[o.key]) - w.was[o.key] }))
+      .find((x) => x.d !== 0)
+    planWatch.current = null
+    if (!changed) return
+    // Only worth asking where the projection cannot follow on its own. A unit
+    // with nothing recorded against it already moved with the plan, and a
+    // question about it would have no second answer.
+    const unit = units.find((x) => x.id === w.jobId)
+    const st = stepsByJob.get(w.jobId) || {}
+    const from = OPS.findIndex((o) => o.key === changed.key)
+    const pinned = OPS.some((o, i) => i >= from && (
+      actualOf(unit, o.key) || actualDaysOf(unit, o.key) != null
+      || (o.key === (unit.stage || 'none') && unit.daysLeft != null)
+      || (st[o.key] || []).some((x) => x.actualStart || x.actualDays != null)))
+    if (!pinned) return
+    setAsk({
+      jobId: w.jobId, key: changed.key, d: changed.d, edit: w.edit,
+      unit: j.unit, label: STAGE_LABEL[changed.key].toLowerCase(),
+    })
+  }, [scheduled, units, stepsByJob, spanDays])
+
+  // Yes: carry it. The change lands at the granularity it was made at, and
+  // every recorded date behind it moves with it -- later steps in the same
+  // station, and every station after. One entry on the undo stack, because it
+  // was one answer.
+  const carryToProjection = useCallback((a) => {
+    setAsk(null)
+    const unit = units.find((x) => x.id === a.jobId)
+    const st = stepsByJob.get(a.jobId) || {}
+    if (!unit) return
+    const from = OPS.findIndex((o) => o.key === a.key)
+    const rows = []
+    const onStep = (id, patch) => rows.push({ kind: 'step', id, patch })
+    const job = {}
+    // The thing that was edited takes the change itself, so a longer step is a
+    // longer step and not a step that starts later.
+    const edited = a.edit && a.edit.kind === 'step' ? a.edit.id : null
+    if (a.edit && a.edit.kind === 'step' && a.edit.field === 'days') {
+      const row = (st[a.key] || []).find((x) => x.id === edited)
+      if (row && row.actualDays != null) onStep(edited, { actual_days: Math.max(1, row.actualDays + a.d) })
+    } else if (a.edit && a.edit.kind === 'job') {
+      if ((unit.stage || 'none') === a.key && unit.daysLeft != null) job.daysLeft = Math.max(0, unit.daysLeft + a.d)
+      else if (actualDaysOf(unit, a.key) != null) {
+        job.actualDays = { ...unit.actualDays, [a.key]: Math.max(1, actualDaysOf(unit, a.key) + a.d) }
+      }
+    }
+    // Everything recorded behind it slides by the same number of working days.
+    OPS.forEach((o, i) => {
+      if (i < from) return
+      const own = i === from && a.edit && a.edit.kind === 'step' && a.edit.field === 'days'
+      ;(st[o.key] || []).forEach((x) => {
+        if (!x.actualStart || (own && x.id === edited)) return
+        onStep(x.id, { actual_start: isoDate(shiftWorkdays(cal, x.actualStart, a.d)) })
+      })
+      const at = actualOf(unit, o.key)
+      if (at && !(i === from && a.edit && a.edit.kind === 'job')) {
+        job.actuals = { ...(job.actuals || unit.actuals), [o.key]: shiftWorkdays(cal, at, a.d) }
+      }
+    })
+    if (Object.keys(job).length) rows.push({ kind: 'job', id: a.jobId, patch: job })
+    if (!rows.length) return
+    saveRows(rows, `${a.unit} — ${a.label} carried ${a.d > 0 ? '+' : ''}${a.d} d into the projection`)
+  }, [units, stepsByJob, cal, saveRows])
+
   // Dragging a step bar, the same two gestures the station bars take. An edge
   // changes how long the step takes; the middle holds it back.
   //
@@ -1118,7 +1250,6 @@ export default function App() {
 
   // Sorting reads the projection and the catalogue as well as the unit itself,
   // and runs from an effect, so the current values go through refs.
-  const scheduledRef = useRef(scheduled)
   const sortRef = useRef(sort)
   const projRef = useRef(projById)
   const partsRef = useRef(partsById)
@@ -1619,6 +1750,19 @@ export default function App() {
         <button className="btn sm" onClick={resettleBoard}
           title="Apply the current sort again">Re-sort rows</button>
         {flash && <div className="flash" role="status">{flash}</div>}
+        {/* Not the flash: that fades after three seconds, and this one is a
+            question. It stays until it is answered or waved away, and a second
+            qualifying edit replaces it rather than stacking. */}
+        {ask && (
+          <div className="askline" role="status">
+            <span><b>{ask.unit}</b> — planned {ask.label}
+              {' '}{ask.d > 0 ? 'grew' : 'shrank'} {Math.abs(ask.d)} day{Math.abs(ask.d) === 1 ? '' : 's'}.
+              {' '}Move the projection {ask.d > 0 ? 'out' : 'in'} by {Math.abs(ask.d)} too?</span>
+            <button className="btn sm" onClick={() => carryToProjection(ask)}>
+              {ask.d > 0 ? 'Add' : 'Take off'} {Math.abs(ask.d)} d</button>
+            <button className="btn sm" onClick={() => setAsk(null)}>Leave it</button>
+          </div>
+        )}
         {calendarEnabled
           ? <div className="hint">Click any date to close or open that day</div>
           : <div className="hint bad">Day toggles need the <code>day_overrides</code> table — see supabase/schema.sql</div>}
@@ -2061,6 +2205,14 @@ function SignIn() {
 function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
   showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns }) {
+  // The standard this unit's model builds to, for saying where the unit has
+  // drifted off it. A unit with no part number has no standard to drift from.
+  const partById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
+  const partOf = (j) => (j.partId ? partById.get(j.partId) : null) || {}
+  const partStd = (j, key) => {
+    const v = partOf(j)[`${key}_days`]
+    return v == null ? null : v
+  }
   // Which column is being dragged, and which one the pointer is over. Transient
   // -- where the columns end up is the caller's to keep.
   const [dragCol, setDragCol] = useState(null)
@@ -2221,11 +2373,22 @@ function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApp
       key: o.key, label: SHORT[o.key], cls: 'w-num',
       cell: ({ j, st }) => {
         const built = Boolean(st && st[o.key].length)
+        // Editing a part number never reschedules the units already carrying it
+        // -- that is deliberate, so a standard can be corrected without moving
+        // work that is already booked. The cost is that a unit quietly stops
+        // matching its own model, so say which station it is and what the
+        // standard says. Shown against the number that drifted rather than as a
+        // flag on the row, because it is the number that is the answer.
+        const std = partStd(j, o.key)
+        const off = std != null && std !== j[o.key]
+        const tip = !off ? (built ? "Built from this station's steps" : undefined)
+          : `${partOf(j).part_number} builds this in ${std} d — this unit is set to ${j[o.key]}`
+            + (built ? ', from its steps' : '')
         return (
-          <td key={o.key}>
+          <td key={o.key} className={off ? 'drift' : undefined} title={tip}>
             {/* built from steps: the number is the longest chain, not something to type */}
             {built
-              ? <span className="calc built" title="Built from this station's steps">{j[o.key]}</span>
+              ? <span className="calc built" title={tip}>{j[o.key]}</span>
               : <input type="number" min="1" value={j[o.key]}
                   onChange={(e) => onSave(j.id, { [o.key]: Math.max(1, parseInt(e.target.value) || 1) })} />}
           </td>
@@ -3556,6 +3719,11 @@ function Style() {
     .hint { color: #7A848C; }
     .flash { font-weight: 600; color: #2D6044; background: #E1EEE6; border: 1px solid #BBD8C7;
       border-radius: 4px; padding: 3px 9px; white-space: nowrap; }
+    /* A question, so it is warmer than the flash and does not go away on its
+       own -- the board is waiting on an answer. */
+    .askline { display: flex; align-items: center; gap: 8px; font-weight: 600; color: #7A4A12;
+      background: #F5E8DA; border: 1px solid #E0C49E; border-radius: 4px; padding: 3px 5px 3px 9px; }
+    .askline .btn { font-weight: 600; }
     kbd { font-family: inherit; font-size: 10px; font-weight: 700; border: 1px solid #C6CDD1;
       border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: #FFF; color: #3A434B; }
     .hint.bad { color: #B3382E; }
@@ -3892,6 +4060,12 @@ function Style() {
     .btn.sm { padding: 5px 10px; font-size: 12px; }
     .pntag { display: inline-block; font-size: 10px; font-weight: 700; color: #44688F; background: #E3EAF2; border-radius: 3px; padding: 1px 5px; margin-right: 6px; }
     .field select { font-family: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid #C6CDD1; border-radius: 4px; width: 160px; }
+    /* A station no longer built to its part number's standard. The same warm
+       tone the unit panel uses to say the same thing, kept faint because it
+       marks a difference worth seeing rather than a problem. */
+    .orders td.drift { background: #FBF0E4; box-shadow: inset 0 0 0 1px #E6CBA6; }
+    .orders td.drift input { background: transparent; font-weight: 700; color: #7A4A16; }
+    .orders td.drift .calc { font-weight: 700; color: #7A4A16; }
     .driftline { font-size: 12px; background: #F5E8DA; color: #7A4A16; border-radius: 4px; padding: 9px 12px; margin: 12px 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; line-height: 1.4; }
     .addrow select { font-family: inherit; font-size: 13px; padding: 7px 8px; border: 1px solid #C6CDD1; border-radius: 4px; max-width: 320px; }
     .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 13px; }
