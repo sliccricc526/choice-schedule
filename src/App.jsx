@@ -4,11 +4,19 @@ import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, daysToGo, runFromDaysToGo,
   STAGE_LABEL, STAGE_RANK, stageDates,
-  workdaysInclusive, hasPins, hasActuals, stepPlan, stepSpans, stepActualSpans, stepLanes, stepDependsOn, stageOverdue,
+  workdaysInclusive, hasPins, hasActuals, stepPlan, stepSpans, stepActualSpans, projectedSteps, stepLanes, stepDependsOn, stageOverdue,
   PRIORITY_DEFAULT, PRIORITY_MAX,
 } from './engine.js'
 
 const COL = 26
+// Where a projected station's steps are measured from. The bar itself stretches
+// to cover them, so its drawn start is not the place to lay them out -- that
+// would move the steps that moved the bar. `anchor` is only set on a station
+// that has steps; everywhere else the start is the anchor.
+const stationAnchor = (proj, key) => {
+  const s = proj && proj.spans[key]
+  return s ? (s.anchor || s.start) : null
+}
 const SHORT = { fab: 'Fab', paint: 'Paint', asm: 'Assembly' }
 const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 // The same date, written the way a date field writes it. Anywhere a calculated
@@ -842,9 +850,9 @@ export default function App() {
   // Where the work actually lands: remaining work pushed forward from today.
   // The plan above says when work *should* happen; this says when it will.
   const { projected, projectError } = useMemo(() => {
-    try { return { projected: projectSchedule(units, caps, today, cal), projectError: '' } }
+    try { return { projected: projectSchedule(units, caps, today, cal, stepsByJob), projectError: '' } }
     catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
-  }, [units, caps, today, cal])
+  }, [units, caps, today, cal, stepsByJob])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
 
   // Dragging a step bar, the same two gestures the station bars take. An edge
@@ -871,15 +879,13 @@ export default function App() {
     const onProj = block === 'sproj'
     if (onProj && !stepActualsEnabled) return
     const proj = onProj ? projById.get(jobId) : null
-    const stationStart = onProj
-      ? (proj && proj.spans[stage] && proj.spans[stage].start)
-      : sched.spans[stage].start
+    const stationStart = onProj ? stationAnchor(proj, stage) : sched.spans[stage].start
     // A station with no work left to project has no projected block, and a
     // projection that threw has no spans at all.
     if (!stationStart) return
     // Measured against the bar that is actually drawn, which for the projected
     // block is the one carrying whatever has already been recorded.
-    const view = onProj ? list.filter((x) => !x.done || x.actualStart) : list
+    const view = onProj ? projectedSteps(list) : list
     const spans = onProj
       ? stepActualSpans(stationStart, view, cal)
       : stepSpans(stationStart, view, cal)
@@ -983,8 +989,8 @@ export default function App() {
           workdaysInclusive(start > span.end ? strip(span.end) : start, span.end, cal))
         const built = (stepsByJob.get(jobId) || {})[key]
         if (built && built.length) {
-          // A station built from steps is as long as its steps; a length written
-          // here would be ignored and the edge would spring back.
+          // Broken into steps, so the steps are what say how long it runs. A
+          // length written here would be ignored and the edge would spring back.
         } else if (running) {
           patch.daysLeft = runFromDaysToGo(job, today, days, cal)
         } else {
@@ -998,6 +1004,11 @@ export default function App() {
     const end = addDays(span.end, deltaDays)
     const days = Math.max(running ? 0 : 1,
       workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
+    // Broken into steps, so the steps are what say how long it runs -- on the
+    // station under way as much as on one still ahead. The number would be
+    // written and then ignored, and the bar would spring back to its steps.
+    const built = (stepsByJob.get(jobId) || {})[key]
+    if (built && built.length) return
     if (running) {
       // What is left on the station the unit is standing in. Stored as the run
       // length from the day it started, so the finish stays where it is dropped
@@ -1008,10 +1019,6 @@ export default function App() {
       }
       return
     }
-    // A station built from steps is as long as its steps; the number would be
-    // written and then ignored, so the bar would spring back.
-    const built = (stepsByJob.get(jobId) || {})[key]
-    if (built && built.length) return
     if (days !== (job.actualDays && job.actualDays[key] != null ? job.actualDays[key] : job[key])) {
       saveDrag('job', jobId, { actualDays: { ...job.actualDays, [key]: days } }, label)
     }
@@ -3130,9 +3137,11 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // planned start for the block under the plan, and from the projected start
   // for the block under the projection. A unit's pieces of work then read the
   // same way its stations do -- what was sold above, what is coming below.
+  // `keep` null means the projection's own view of the block, which the engine
+  // uses too when it works out how long the station has to be to contain it.
   const lay = (startOf, keep, span) => (open && hasSteps
     ? OPS.map((o) => {
-        const list = (steps[o.key] || []).filter(keep)
+        const list = keep ? (steps[o.key] || []).filter(keep) : projectedSteps(steps[o.key])
         const start = list.length ? startOf(o.key) : null
         if (!start) return null
         const spans = span(start, list)
@@ -3149,8 +3158,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // A station with no projected span -- closed, finished, or running with no
   // days left -- has no block at all.
   const laidProj = tracking && proj
-    ? lay((k) => (proj.spans[k] || {}).start,
-      (s) => !s.done || s.actualStart, (a, b) => stepActualSpans(a, b, cal))
+    ? lay((k) => stationAnchor(proj, k), null, (a, b) => stepActualSpans(a, b, cal))
     : []
   const planLanes = laidPlan.reduce((n, l) => Math.max(n, l.count), 0)
   const projLanes = laidProj.reduce((n, l) => Math.max(n, l.count), 0)
@@ -3356,14 +3364,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                 + (ringReason[o.key] ? ` — ${ringReason[o.key]}` : '')
                 + (recorded ? ' — recorded by the shop, not worked out' : '')
                 + (!onDragProjected ? ''
+                  : built ? '. Drag to say when it really runs; its length is whatever its steps cover'
                   : running ? '. Drag to say when the rest of it runs, or the right edge for the days left'
-                  : built ? '. Drag to say when it really runs; its length comes from its steps'
                   : '. Drag to say when it really runs, or an edge for how long it really takes')
                 + (onDragProjected ? '. The planned bar above does not move' : '')}
               style={{ left: x + 1, width: w - 3, top: projTop,
                 background: o.light, borderColor: o.color, color: o.color }}>
               {onDragProjected && <span className="grip l" />}
-              {onDragProjected && !(built && !running) && <span className="grip r" />}
+              {onDragProjected && !built && <span className="grip r" />}
             </div>
           )
         })}
@@ -3403,14 +3411,6 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             // out at 1.96:1. Outlined, a done step keeps the contrast it has
             // today and still recedes.
             const plan = kind === 'splan' && !st.done
-            // A running station is the one place the two can disagree: its
-            // projected bar is as long as the days the shop says are left,
-            // while its steps are as long as the chain through whatever has not
-            // been ticked off. When the steps run longer the block overhangs
-            // its bar, which is worth saying rather than looking like a slip of
-            // the pen. Everywhere else the two end on the same day.
-            const past = kind === 'sproj' && !st.done && proj && proj.spans[op.key]
-              && st.end > proj.spans[op.key].end
             // Somebody has said where this piece really goes. Marked the way a
             // stage placed by hand is marked, because it is the same statement
             // one scale down: this is not where the board worked it out, it is
@@ -3435,8 +3435,6 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                   + (recorded ? `. Recorded${st.fixed ? ` as running from ${fmt(st.start)}` : ''}`
                     + `${st.actualDays != null ? `${st.fixed ? ', ' : ' as '}taking ${st.actualDays} d` : ''}`
                     + ', not worked out from the plan' : '')
-                  + (past ? '. Runs past the days left on the station — tick off what is done,'
-                    + ' change the days left, or move it back' : '')
                   + (!drags ? ''
                     : kind === 'splan' ? '. Drag to hold it back, drag an edge to change its days.'
                     : '. Drag to say where it actually runs, or an edge for how long it actually takes.'

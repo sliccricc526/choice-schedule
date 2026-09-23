@@ -180,6 +180,12 @@ export function stepSpans(start, steps, cal = defaultCalendar) {
 // not the edge, and is simply no link. A step reached while it is still being
 // visited is waiting on itself; it contributes nothing, which lands it on the
 // station's own start, the same answer stepPlan gives.
+// Which of a station's steps the projection carries: work still to come, plus
+// anything the shop has reported on, because a recorded fact is worth drawing
+// wherever it landed. Defined once so the bars, the drag and the station length
+// that has to contain them cannot disagree about what is in the block.
+export const projectedSteps = (steps) => (steps || []).filter((s) => !s.done || s.actualStart)
+
 export function stepActualSpans(start, steps, cal = defaultCalendar) {
   const list = steps || []
   const byId = new Map(list.map((s) => [s.id, s]))
@@ -581,7 +587,10 @@ export function runFromDaysToGo(job, today, toGo, cal = defaultCalendar) {
 // makes this differ from the backward plan, and the difference is the slip.
 // Units under way are placed first: you don't stop a trailer mid-fab to start
 // another one.
-export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
+// `stepsBy` maps a job id to its steps by station, the way the board holds them.
+// A station drawn from steps has to be as long as those steps actually run --
+// see where it is used below.
+export function projectSchedule(jobs, caps, today, cal = defaultCalendar, stepsBy = null) {
   const usage = { fab: {}, paint: {}, asm: {} }
   const free = (st, d) => (usage[st][isoDate(d)] || 0) < Math.max(1, caps[st])
   const take = (st, s, e) => {
@@ -656,6 +665,26 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar) {
       const earliest = actual ? strip(actual)
         : pin && strip(pin) > cursor ? strip(pin) : cursor
       const blk = fixed ? runFrom(earliest, days) : forwardBlock(key, days, earliest)
+      // Once a station is broken into steps, the steps are the work and the
+      // station is only their outline -- so it is exactly the span they cover,
+      // not the days left or the days booked. Those placed it; they do not get
+      // to say how long it runs. It follows the steps both ways: past the end
+      // when one is reported running late, and back when they finish sooner
+      // than the figure underneath. The same rule the planned bar has always
+      // followed, where a station built from steps takes its length from them
+      // and cannot be stretched by its own edge.
+      //
+      // `anchor` is where the steps are measured from and stays where the
+      // placement put it; start and end are what gets drawn. Keeping the two
+      // apart is what stops this feeding back on itself -- fitting the bar to
+      // its steps must not move the steps it was fitted to.
+      const list = stepsBy && projectedSteps((stepsBy.get(job.id) || {})[key])
+      if (list && list.length) {
+        const spans_ = stepActualSpans(blk.start, list, cal)
+        blk.anchor = blk.start
+        blk.start = spans_.reduce((m, x) => (x.start < m ? x.start : m), spans_[0].start)
+        blk.end = spans_.reduce((m, x) => (x.end > m ? x.end : m), spans_[0].end)
+      }
       spans[key] = blk
       // Claimed either way, so an overrun station still reports its overload.
       take(key, blk.start, blk.end)
