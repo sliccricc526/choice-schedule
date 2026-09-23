@@ -154,6 +154,86 @@ export function stepSpans(start, steps, cal = defaultCalendar) {
   })
 }
 
+// The projected block's spans: where each piece of work is actually going to
+// happen, as opposed to where the plan puts it.
+//
+// This walks in dates rather than in offsets from the station, because an
+// actual start is an absolute date and can fall before the station even starts
+// -- the shop got a head start -- which no offset into a station-length array
+// can say. A step with `actualStart` is fixed: it takes that date without
+// asking what it waits on, and then acts as an ordinary prerequisite for
+// whatever waits on it, so recording one piece of work pushes the pieces
+// behind it. Two recorded facts are allowed to overlap: a dependent that has
+// its own actual does not move, because the board reports what the floor did
+// rather than overruling it.
+//
+// It must agree with stepSpans exactly when no step carries an actual, which
+// takes five things: round the station start forward to a working day; floor
+// at that base before adding lag, never after; apply lag as that many
+// nextWorkday steps rather than calendar days; take a prerequisite's
+// contribution as the working day after it ends; and keep every Math.max(1, …)
+// clamp. `offset` is measured from the rounded base, not the argument, or
+// every offset shifts by one.
+//
+// Callers filter the list -- the board drops steps that are done and carry no
+// recorded date -- so a `needs` pointing outside it is the common case here,
+// not the edge, and is simply no link. A step reached while it is still being
+// visited is waiting on itself; it contributes nothing, which lands it on the
+// station's own start, the same answer stepPlan gives.
+export function stepActualSpans(start, steps, cal = defaultCalendar) {
+  const list = steps || []
+  const byId = new Map(list.map((s) => [s.id, s]))
+  const base = cal.isWorkday(start) ? strip(start) : cal.nextWorkday(start)
+  // Walking the calendar a day at a time, rather than building one chain the
+  // way stepSpans does, because each step now starts wherever it starts. This
+  // runs for every open row on every pointermove of a drag, so the settled
+  // results are kept: a diamond of `needs` would otherwise be walked twice for
+  // every branch that reaches it.
+  const on = (from, n) => { let d = strip(from); for (let i = 0; i < n; i++) d = cal.nextWorkday(d); return d }
+  const span = new Map()
+  const state = new Map()            // 1 = being visited, 2 = settled
+  let cycle = false
+  const visit = (s) => {
+    if (state.get(s.id) === 2) return span.get(s.id)
+    const days = Math.max(1, s.actualDays == null ? (s.days || 1) : s.actualDays)
+    // A step reached while it is still being visited is waiting on itself.
+    // Answer the way stepPlan does -- as though it began with the station, so
+    // its length still counts against whatever asked -- rather than dropping
+    // it, which would put the pair a few days earlier than the plan block has
+    // them and make a cycle look different in the two lanes.
+    if (state.get(s.id) === 1) { cycle = true; return { start: base, end: on(base, days - 1) } }
+    state.set(s.id, 1)
+    let from = base
+    if (!s.actualStart) {
+      ;(s.needs || []).forEach((id) => {
+        const n = byId.get(id)
+        if (!n) return
+        const sp = visit(n)
+        if (!sp) return
+        const after = cal.nextWorkday(sp.end)
+        if (after > from) from = after
+      })
+      from = on(from, Math.max(0, s.lag || 0))
+    } else {
+      from = cal.isWorkday(s.actualStart) ? strip(s.actualStart) : cal.nextWorkday(s.actualStart)
+    }
+    const out = {
+      // `days` after the spread on purpose: stepLanes packs lanes off this
+      // field, not off the dates, so the effective length has to be the one it
+      // reads or a bar drawn at its actual length is packed at its planned one.
+      ...s, days, fixed: Boolean(s.actualStart),
+      offset: cal.workdaysBetween(base, from), start: from, end: on(from, days - 1),
+    }
+    state.set(s.id, 2)
+    span.set(s.id, out)
+    return out
+  }
+  list.forEach(visit)
+  const out = list.map((s) => span.get(s.id))
+  out.cycle = cycle
+  return out
+}
+
 // Lanes for drawing: the first line on which a step does not overlap something
 // already there, so parallel work stacks instead of sitting on top of itself.
 export function stepLanes(spans) {

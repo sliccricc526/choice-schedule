@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without `actual_start` and `actual_days` on `job_steps` the board draws both step blocks as before and a projected step simply doesn't drag. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -199,6 +199,57 @@ and dragging right can lengthen the station if the step is on its critical path.
 On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
 across their station's block, spread over as many lines as it takes for none to sit on top of
 another — so work that runs side by side is drawn side by side, and the row grows to fit.
+
+**The steps are drawn twice, once against each station bar**, so a unit's pieces of work read the
+way its stations do. The upper block sits under the planned bars and is filled solid: the plan, step
+by step, measured from each station's planned start. The lower block sits under the projections and
+is drawn outlined: where each piece of work is actually expected to land, measured from each
+station's projected start. A row therefore splits into a plan half and a projection half, and the
+gap between a step in one and the same step in the other is how far that piece of work has moved.
+
+Three things follow from what the lower block is:
+
+- **A step already ticked off does not appear in the projection**, unless something has been
+  recorded against it. It is not work still to come, so it stays in the plan block above, struck
+  through and outlined, where it belongs to the record rather than to the forecast. For the station
+  in progress this is what makes the block read correctly: what is left of it runs from where the
+  projection puts it.
+- **A station with nothing left to project has no lower block** — one the unit has already passed,
+  a finished unit, or a running station with no days left. The plan block is still drawn.
+- **On the station in progress the two blocks can disagree in length.** Its projected bar is as long
+  as the days the shop says are left; its steps are as long as the longest chain through whatever
+  has not been ticked off. When the steps run longer the block overhangs its bar, and the step that
+  overhangs says so when you hover it. Everywhere else the two end on the same day.
+
+**The two blocks hold two different things, and a drag on one never writes the other.** The planned
+block is what the customer was promised and what the shop intends to do: a step's *wait* and its
+*length*, which together decide how long the station takes. The projected block is the progress
+actually being made: where a piece of work really lands and how long it really takes.
+
+So dragging a **planned** step sets its wait or its length, as it always has, and the projection
+follows because it is derived from the plan. Dragging a **projected** step records a date and a
+duration against that step alone — and the planned bars above it do not move, at all. That is the
+whole point of the split: step waits feed the station's critical path, and the plan is scheduled
+backward from delivery, so a longer station starts *earlier*. Writing the floor's progress into the
+plan would have re-dated the unit the customer was quoted.
+
+A step you have placed by hand carries a dot, the way a stage placed by hand does, so it is clear at
+a glance which pieces are recorded and which the board worked out. Recording one pushes whatever
+waits on it, because a piece of work cannot begin before the piece it waits on has finished. A step
+that has its *own* recorded date does not get pushed — two facts are allowed to overlap, since the
+shop does start a follow-on early, and the board reports what happened rather than overruling it.
+
+**A recorded date can sit anywhere**, including before the station's remaining work is due to begin —
+that is how you say a job got a head start. The board widens its own date range to keep the bar in
+view. A step that has been ticked off disappears from the projection as before, *unless* something
+has been recorded against it, in which case it stays, struck through, at the dates it really took: a
+block that reads left to right as what happened and then what is left.
+
+To put a step back to derived, clear it from the unit's panel — the chip beside its planned day shows
+what was recorded, with an × to remove it. `Ctrl`+`Z` undoes that as it undoes a drag.
+
+This needs the `actual_start` and `actual_days` columns on `job_steps`. Without them the board draws
+both blocks exactly as before and a projected step simply does not drag.
 
 Two consequences worth knowing:
 
