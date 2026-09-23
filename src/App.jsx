@@ -15,6 +15,10 @@ const COL = 26
 // a Friday, nudge it a day, and it leapt to Monday. Rounding back instead means
 // the bar sits under the pointer when the pointer is on a working day, and
 // simply does not move when it is not.
+// The same rule serves an edge: dragging a finish left onto a Sunday used to
+// count the working days up to the Friday, pulling the end back three columns
+// for a one-column drag, because workdaysInclusive rounds down whichever way
+// the pointer went.
 const onWorkday = (cal, d, dir) => (cal.isWorkday(d) ? strip(d)
   : dir < 0 ? cal.nextWorkday(d) : cal.prevWorkday(d))
 // Where a projected station's steps are measured from. The bar itself stretches
@@ -805,11 +809,11 @@ export default function App() {
     const job = units.find((j) => j.id === jobId)
     const sched = scheduled.find((j) => j.id === jobId)
     if (!job || !sched) return
-    // A station built from steps is as long as its steps; stretching the bar
-    // would write a day count the rollup then ignores, so the bar would spring
-    // back. Moving it is still fine — that changes when, not how long.
+    // Broken into steps, so the steps are the work and this bar is only their
+    // outline -- it shows how long the station runs and nothing more. Its
+    // length comes from them, and so does where it sits: move the steps.
     const built = (stepsByJob.get(jobId) || {})[key]
-    if (mode !== 'move' && built && built.length) return
+    if (built && built.length) return
     const span = sched.spans[key]
     // A stage cannot begin on a day the shop is shut, so a bar dropped on one
     // takes the nearest working day *in the direction it was dragged*. Always
@@ -821,7 +825,7 @@ export default function App() {
     if (mode === 'move') {
       start = onWorkday(cal, addDays(span.start, deltaDays), deltaDays)
     } else if (mode === 'end') {
-      const end = addDays(span.end, deltaDays)
+      const end = onWorkday(cal, addDays(span.end, deltaDays), deltaDays)
       dur = workdaysInclusive(span.start, end < span.start ? span.start : end, cal)
     } else {
       const moved = onWorkday(cal, addDays(span.start, deltaDays), deltaDays)
@@ -909,7 +913,7 @@ export default function App() {
     // dragged. A step cannot start on a day the shop is shut.
 
     if (mode === 'end') {
-      const end = addDays(span.end, deltaDays)
+      const end = onWorkday(cal, addDays(span.end, deltaDays), deltaDays)
       const days = Math.max(1,
         workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
       if (onProj) { if (days !== span.days) record({ actual_days: days }, 'days it takes') }
@@ -1001,7 +1005,7 @@ export default function App() {
       return
     }
     if (mode !== 'end') return
-    const end = addDays(span.end, deltaDays)
+    const end = onWorkday(cal, addDays(span.end, deltaDays), deltaDays)
     const days = Math.max(running ? 0 : 1,
       workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
     if (running) {
@@ -3304,20 +3308,23 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           }
           const pinned = Boolean(j.pins && j.pins[o.key])
           const built = Boolean(steps && steps[o.key].length)
+          // Same rule as the lane below: a station broken into steps is not a
+          // handle. The steps place it and set its length; the bar follows them
+          // and shows how long the station runs.
+          const handle = onDragStage && !built
           return <div key={o.key}
-            className={`bar plan${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${onDragStage ? ' draggable' : ''}`}
-            onPointerDown={onDragStage ? (e) => down(e, 'plan', o.key) : undefined}
-            onPointerMove={onDragStage ? move : undefined}
-            onPointerUp={onDragStage ? up : undefined}
-            onPointerCancel={onDragStage ? up : undefined}
+            className={`bar plan${pinned ? ' pinned' : ''}${live ? ' dragging' : ''}${handle ? ' draggable' : ''}`}
+            onPointerDown={handle ? (e) => down(e, 'plan', o.key) : undefined}
+            onPointerMove={handle ? move : undefined}
+            onPointerUp={handle ? up : undefined}
+            onPointerCancel={handle ? up : undefined}
             title={`Planned ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
               + (pinned ? ' — placed by hand' : '')
-              + (built ? (steps[o.key].length === 1
-                  ? `. 1 step, spanning ${j[o.key]} days — edit it to change the station's length`
-                  : `. ${steps[o.key].length} steps spanning ${j[o.key]} days — edit them to change the station's length`) : '')
-              + (onDragStage ? '. Drag to move it.' : '')}
+              + (built ? `. Broken into ${steps[o.key].length === 1 ? '1 step' : `${steps[o.key].length} steps`}`
+                  + ` spanning ${j[o.key]} days — drag those; this bar follows them`
+                : onDragStage ? '. Drag to move it, or an edge to change its days.' : '')}
             style={{ left: x + 1, width: w - 3, background: o.color, borderColor: o.light, color: o.light }}>
-            {onDragStage && !built && <><span className="grip l" /><span className="grip r" /></>}
+            {handle && <><span className="grip l" /><span className="grip r" /></>}
           </div>
         })}
         {/* lower lane: where the remaining work actually lands. Same colour as

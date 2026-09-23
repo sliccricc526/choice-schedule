@@ -181,9 +181,11 @@ lower bar reports a fact, and the planned bar above it does not move:
   not get moved. It may sit in the past, which is how you say a station ran early.
 - **An edge** says how long it really takes. On the station a unit is standing in that is the **days
   left**, which is its own stored figure; on one still ahead it is a recorded length of its own.
-- **A station broken into steps has neither.** Its steps place it and set its length, so the bar is
-  only their outline — drag the steps. It carries no grips and no grab cursor, and says so when you
-  hover it.
+- **A station broken into steps has neither, on either lane.** Its steps place it and set its
+  length, so the bar is only their outline — it shows how long the station runs and nothing more.
+  Drag the steps. A stepped bar carries no grips and no grab cursor, on the plan as on the
+  projection, and says so when you hover it. A station nobody has broken down keeps both gestures
+  exactly as before.
 
 A station you have reported on carries a dot, and the unit's panel lists them with an × to hand each
 one back to the projection. `Ctrl`+`Z` undoes that as it undoes a drag.
@@ -292,9 +294,9 @@ Three consequences worth knowing:
 
 - **A station whose steps are every one of them held back starts when the first of them starts.**
   The station is the work in it, so there are no dead days at the front that nothing occupies.
-- A station built from steps **cannot be stretched by dragging its edge**, on either lane, because
-  its length comes from its steps. Drag the middle to move it as usual; change the steps to change
-  how long it takes.
+- A station built from steps **is not a handle at all**, on either lane — not its middle and not its
+  edge. Its length and its position both come from its steps, so that is what you drag. Placing such
+  a station by hand therefore means placing its steps; there is no pin to put on the station itself.
 - **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
   time. Days left on a station is still its own figure, counted from the day the station started.
 
