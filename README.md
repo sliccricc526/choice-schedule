@@ -250,7 +250,23 @@ block is what the customer was promised and what the shop intends to do: a step'
 actually being made: where a piece of work really lands and how long it really takes.
 
 So dragging a **planned** step sets its wait or its length, as it always has, and the projection
-follows because it is derived from the plan. Dragging a **projected** step records a date and a
+follows — because it is derived from the plan, wherever nothing has been recorded against it.
+
+**Where something has been recorded, the board asks.** A recorded date is a fact and stops following
+the plan, so when a plan edit makes a station longer or shorter the board cannot know whether those
+days belong to the floor as well. It says so, and waits:
+
+> **1002 — planned fabrication grew 2 days.** Move the projection out by 2 too? **[Add 2 d]** **[Leave it]**
+
+**Add** applies the change where you made it — a longer step becomes a longer step, not a step that
+starts later — and then slides everything recorded behind it by the same number of working days:
+later steps in that station, and every station after. It is one entry on the undo stack, so `Ctrl`+`Z`
+puts the whole lot back in one press. **Leave it** writes nothing, because a recorded date already
+holds where it is.
+
+Nothing is asked when the projection is wholly derived — there is no second answer to give. The
+question comes from any route into the plan, a board drag and a typed day count alike, and only when
+the length actually changed: moving a bar without resizing it raises nothing. Dragging a **projected** step records a date and a
 duration against that step alone — and the planned bars above it do not move, at all. That is the
 whole point of the split: step waits feed the station's critical path, and the plan is scheduled
 backward from delivery, so a longer station starts *earlier*. Writing the floor's progress into the
