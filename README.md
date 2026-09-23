@@ -181,9 +181,19 @@ lower bar reports a fact, and the planned bar above it does not move:
   not get moved. It may sit in the past, which is how you say a station ran early.
 - **An edge** says how long it really takes. On the station a unit is standing in that is the **days
   left**, which is its own stored figure; on one still ahead it is a recorded length of its own.
+- **A station broken into steps has neither, on either lane.** Its steps place it and set its
+  length, so the bar is only their outline — it shows how long the station runs and nothing more.
+  Drag the steps. A stepped bar carries no grips and no grab cursor, on the plan as on the
+  projection, and says so when you hover it. A station nobody has broken down keeps both gestures
+  exactly as before.
 
 A station you have reported on carries a dot, and the unit's panel lists them with an × to hand each
 one back to the projection. `Ctrl`+`Z` undoes that as it undoes a drag.
+
+**A bar never lands past where you dropped it.** The board draws Saturdays and Sundays, but work
+cannot start on one, so a drop that falls on a closed day snaps back to the last day work can start
+— and the bar shows that while you drag, rather than springing somewhere else on release. Drag onto
+a weekend and it visibly stays put; drag to the Monday and it goes to the Monday.
 
 This is not the same as **placing a stage by hand**, which is what dragging the *planned* bar does.
 That writes a pin: an instruction the backward schedule honours verbatim, so it re-dates the whole
@@ -194,10 +204,20 @@ the pointer sprang back. They are separate columns now. Where a station has both
 takes the recorded fact and the plan keeps its pin: a pin is a wish, and this is a measurement.
 
 Step bars take the same two gestures the station bars do. **Drag an edge** to change how long a step
-takes. **Drag the middle** to hold it back: a step has no start date of its own, so moving one sets
-its *lag* — the working days it waits beyond whatever it waits on. Dragging left therefore stops at
-the earliest the step could possibly start, which is an honest limit rather than an arbitrary one,
-and dragging right can lengthen the station if the step is on its critical path.
+takes. **Drag the middle** to move it: a step has no start date of its own, so moving one sets its
+*lag* — the working days it sits away from whatever it waits on. Positive holds it back; negative
+brings it forward, overlapping what it waits on, or starting before the station's own origin for a
+step that waits on nothing.
+
+**A station is the window its steps occupy**, so bringing one forward widens the station rather than
+clipping the step. Drag a step left and it lands where you drop it, its neighbours stay put, and the
+planned bar grows leftward to cover it. The finish does not move: the plan is scheduled backward from
+the delivery date, so a longer station starts sooner.
+
+That does mean the two directions do not feel the same. Dragging **right** also grows the station,
+and because the finish is pinned the whole block slides left to fit — so the step you dragged comes
+back part of the way and its neighbours move left. That is what just-in-time means, and it is the
+one place the planned lane and the projected lane behave differently.
 
 On the board, a unit with steps gets a ▸ beside its work-order number. Expanded, the steps are drawn
 across their station's block, spread over as many lines as it takes for none to sit on top of
@@ -253,6 +273,11 @@ still drags.
 The one thing that does not move is the plan. The projected bar follows its projected steps; the
 planned bar follows its planned steps; neither lane reaches across.
 
+**A step brought forward on the plan does not book work in the past.** The projected block honours
+the same lag, but never earlier than the day the station's remaining work begins: the plan may say
+the neck starts four days before the frame is done, while the projection is what is still to do, and
+none of that happened yesterday. A step with a *recorded* date is the exception and keeps it.
+
 **A recorded date can sit anywhere**, including before the station's remaining work is due to begin —
 that is how you say a job got a head start. The board widens its own date range to keep the bar in
 view. A step that has been ticked off disappears from the projection as before, *unless* something
@@ -265,11 +290,13 @@ what was recorded, with an × to remove it. `Ctrl`+`Z` undoes that as it undoes 
 This needs the `actual_start` and `actual_days` columns on `job_steps`. Without them the board draws
 both blocks exactly as before and a projected step simply does not drag.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
-- A station built from steps **cannot be stretched by dragging its edge**, on either lane, because
-  its length comes from its steps. Drag the middle to move it as usual; change the steps to change
-  how long it takes.
+- **A station whose steps are every one of them held back starts when the first of them starts.**
+  The station is the work in it, so there are no dead days at the front that nothing occupies.
+- A station built from steps **is not a handle at all**, on either lane — not its middle and not its
+  edge. Its length and its position both come from its steps, so that is what you drag. Placing such
+  a station by hand therefore means placing its steps; there is no pin to put on the station itself.
 - **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
   time. Days left on a station is still its own figure, counted from the day the station started.
 
