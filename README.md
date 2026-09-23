@@ -181,9 +181,17 @@ lower bar reports a fact, and the planned bar above it does not move:
   not get moved. It may sit in the past, which is how you say a station ran early.
 - **An edge** says how long it really takes. On the station a unit is standing in that is the **days
   left**, which is its own stored figure; on one still ahead it is a recorded length of its own.
+- **A station broken into steps has neither.** Its steps place it and set its length, so the bar is
+  only their outline — drag the steps. It carries no grips and no grab cursor, and says so when you
+  hover it.
 
 A station you have reported on carries a dot, and the unit's panel lists them with an × to hand each
 one back to the projection. `Ctrl`+`Z` undoes that as it undoes a drag.
+
+**A bar never lands past where you dropped it.** The board draws Saturdays and Sundays, but work
+cannot start on one, so a drop that falls on a closed day snaps back to the last day work can start
+— and the bar shows that while you drag, rather than springing somewhere else on release. Drag onto
+a weekend and it visibly stays put; drag to the Monday and it goes to the Monday.
 
 This is not the same as **placing a stage by hand**, which is what dragging the *planned* bar does.
 That writes a pin: an instruction the backward schedule honours verbatim, so it re-dates the whole
