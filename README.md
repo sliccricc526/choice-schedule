@@ -220,9 +220,26 @@ Three things follow from what the lower block is:
   has not been ticked off. When the steps run longer the block overhangs its bar, and the step that
   overhangs says so when you hover it. Everywhere else the two end on the same day.
 
-**Only the plan block is dragged.** A step's lag and its length are counted from its station's
-planned start, so that is the bar the gesture belongs to; the projection block is where the answer
-lands and has nowhere to write.
+**Either block is a handle.** A step has one wait and one length, with no separate projected
+figures, so a drag on one block writes exactly what a drag on the other would — the same rule the
+station lanes follow, where moving either one writes the same pin. Drag a step in the projection and
+its planned twin moves with it, and the other way round.
+
+The two copies move by the same number of *working days*, which is not always the same number of
+columns. A column is a calendar day; the two copies sit at different points in the week, so the same
+four columns can be four working days in one block and two in the other, because one of them crosses
+a weekend. For that reason only the block under the pointer follows the drag — the twin lands on
+release, where the working days the drag actually bought put it. Expect the planned bar to move a
+different distance, and sometimes not to move at all: the plan is scheduled backward from delivery,
+so holding a step back lengthens the station and pulls its start earlier by as much as the step moved
+inside it.
+
+**One exception: the station the unit is standing in.** Its projection hangs off today and walks
+forward with it, so a wait set against that block would mean "three days from today" and quietly
+mean something else tomorrow — the drift days-left was rebuilt to stop. Its projected steps therefore
+take only the right edge, which sets a length, and show one grip rather than two. Hold them back from
+the plan block above instead. The projected station bar is held back the same way, for the same
+reason.
 
 Two consequences worth knowing:
 
