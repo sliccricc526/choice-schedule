@@ -149,6 +149,26 @@ alter table public.job_steps
   add column if not exists actual_start date,
   add column if not exists actual_days  int check (actual_days is null or actual_days >= 1);
 
+-- Where each station really goes, and how long it really takes, as reported by
+-- the floor. Not the same thing as the `*_pinned_start` columns above: a pin is
+-- an instruction to the planner, honoured verbatim by the backward schedule, so
+-- writing one re-dates the whole unit. These are read by the projection alone.
+-- The board draws the two side by side -- the planned bar over the projected one
+-- -- and a drag on the lower bar writes these, never a pin, so recording
+-- progress cannot move the dates the customer was quoted.
+--
+-- Null means derived: the station falls where capacity and the stations before
+-- it leave room, which is what every station does until somebody says
+-- otherwise. `days_left` still owns the length of the station a unit is
+-- actually standing in; `*_actual_days` is for the ones still ahead of it.
+alter table public.jobs
+  add column if not exists fab_actual_start   date,
+  add column if not exists paint_actual_start date,
+  add column if not exists asm_actual_start   date,
+  add column if not exists fab_actual_days    int check (fab_actual_days   is null or fab_actual_days   >= 1),
+  add column if not exists paint_actual_days  int check (paint_actual_days is null or paint_actual_days >= 1),
+  add column if not exists asm_actual_days    int check (asm_actual_days   is null or asm_actual_days   >= 1);
+
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
 -- overtime. Days with no row follow the default, so this table stays small.

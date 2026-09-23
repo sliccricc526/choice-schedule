@@ -4,7 +4,7 @@ import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
   isoDate, parseDate, projectSchedule, nextStage, daysSpent, daysToGo, runFromDaysToGo,
   STAGE_LABEL, STAGE_RANK, stageDates,
-  workdaysInclusive, hasPins, stepPlan, stepSpans, stepActualSpans, stepLanes, stepDependsOn, stageOverdue,
+  workdaysInclusive, hasPins, hasActuals, stepPlan, stepSpans, stepActualSpans, stepLanes, stepDependsOn, stageOverdue,
   PRIORITY_DEFAULT, PRIORITY_MAX,
 } from './engine.js'
 
@@ -154,6 +154,7 @@ export default function App() {
   // still works on a database that hasn't had the migration run against it.
   const [stageDatesEnabled, setStageDatesEnabled] = useState(true)
   const [stepActualsEnabled, setStepActualsEnabled] = useState(true)
+  const [stationActualsEnabled, setStationActualsEnabled] = useState(true)
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -175,6 +176,7 @@ export default function App() {
       const has = (k) => jrows.length === 0 || Object.prototype.hasOwnProperty.call(jrows[0], k)
       setTrackingEnabled(has('stage'))
       setPinsEnabled(has('fab_pinned_start'))
+      setStationActualsEnabled(has('fab_actual_start'))
     setPriorityEnabled(has('priority'))
       setJobs(jrows.map((r) => ({
         id: r.id, unit: r.unit, desc: r.description || '',
@@ -190,6 +192,18 @@ export default function App() {
         pins: OPS.reduce((m, o) => {
           const v = r[`${o.key}_pinned_start`]
           if (v) m[o.key] = parseDate(v)
+          return m
+        }, {}),
+        // What the floor has reported, which the projection reads and neither
+        // planner does. Absent keys mean the projection works it out.
+        actuals: OPS.reduce((m, o) => {
+          const v = r[`${o.key}_actual_start`]
+          if (v) m[o.key] = parseDate(v)
+          return m
+        }, {}),
+        actualDays: OPS.reduce((m, o) => {
+          const v = r[`${o.key}_actual_days`]
+          if (v != null) m[o.key] = v
           return m
         }, {}),
       })))
@@ -328,6 +342,12 @@ export default function App() {
     if (patch.priority !== undefined) row.priority = patch.priority
     if (patch.pins !== undefined) OPS.forEach((o) => {
       row[`${o.key}_pinned_start`] = patch.pins[o.key] ? isoDate(patch.pins[o.key]) : null
+    })
+    if (patch.actuals !== undefined) OPS.forEach((o) => {
+      row[`${o.key}_actual_start`] = patch.actuals[o.key] ? isoDate(patch.actuals[o.key]) : null
+    })
+    if (patch.actualDays !== undefined) OPS.forEach((o) => {
+      row[`${o.key}_actual_days`] = patch.actualDays[o.key] == null ? null : patch.actualDays[o.key]
     })
     const { error: e } = await supabase.from('jobs').update(row).eq('id', id)
     pendingWrites.current = Math.max(0, pendingWrites.current - 1)
@@ -807,6 +827,18 @@ export default function App() {
   }, [saveJob])
   const releaseAllPins = useCallback((job) => saveJob(job.id, { pins: {} }), [saveJob])
 
+  // Hand a station back to the projection. Through saveDrag rather than saveJob
+  // so Ctrl+Z puts the reported dates back, the way it does for a drag.
+  const clearActual = useCallback((job, key) => {
+    const actuals = { ...job.actuals }, actualDays = { ...job.actualDays }
+    delete actuals[key]
+    delete actualDays[key]
+    saveDrag('job', job.id, { actuals, actualDays },
+      `${job.unit} — ${STAGE_LABEL[key].toLowerCase()} on the floor`)
+  }, [saveDrag])
+  const clearAllActuals = useCallback((job) => saveDrag('job', job.id,
+    { actuals: {}, actualDays: {} }, `${job.unit} — everything reported on the floor`), [saveDrag])
+
   // Where the work actually lands: remaining work pushed forward from today.
   // The plan above says when work *should* happen; this says when it will.
   const { projected, projectError } = useMemo(() => {
@@ -814,22 +846,6 @@ export default function App() {
     catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
   }, [units, caps, today, cal])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
-
-  // Would this pin actually move the projected bar it was dragged from?
-  const projectionMoves = useCallback((jobId, key, patch, span) => {
-    try {
-      const trial = units.map((u) => (u.id === jobId ? { ...u, ...patch } : u))
-      const after = projectSchedule(trial, caps, today, cal).find((p) => p.id === jobId)
-      const moved = after && after.spans[key]
-      // No span at all means the station has no work left to place; treat that
-      // as no move rather than writing a pin against nothing.
-      return Boolean(moved) && moved.start.getTime() !== span.start.getTime()
-    } catch {
-      // A calendar with nowhere to put the work cannot answer; let the pin
-      // through rather than swallowing the drag.
-      return true
-    }
-  }, [units, caps, today, cal])
 
   // Dragging a step bar, the same two gestures the station bars take. An edge
   // changes how long the step takes; the middle holds it back.
@@ -933,45 +949,49 @@ export default function App() {
     if (lag !== (step.lag || 0)) saveDrag('step', stepId, { lag }, stepLabel(sched, step))
   }, [stepsByJob, scheduled, projById, stepActualsEnabled, cal, saveDrag])
 
-  // Dragging the projection — the lower, outlined lane. It is derived, so a
-  // drag has to land somewhere real:
+  // Dragging the projection — the lower, outlined lane. It says what is
+  // actually happening, so a drag on it records a fact and never touches the
+  // plan:
   //
-  //   a station not started yet  middle pins it, an edge sets its days
-  //   the station running now    an edge sets the days the shop says are left
+  //   the middle     the day this station really goes
+  //   an edge        how long it really takes -- days left, on the station the
+  //                  unit is standing in, which is its own stored figure
   //
-  // Moving the running station is refused. Its work is happening now; a bar
-  // that says otherwise would be the board disagreeing with the shop floor.
+  // It used to write a pin, which is the planner's instruction and is honoured
+  // verbatim by the backward schedule -- so recording progress moved the planned
+  // bar above and re-dated the unit the customer was quoted. Sometimes it moved
+  // only that bar, because the projection treats a pin as an earliest and
+  // ignores anything before today or before capacity can take the work. A
+  // recorded date has neither problem: the projection takes it exactly, so the
+  // bar always lands where it was dropped and the plan never hears about it.
   const dragProjected = useCallback((jobId, key, mode, deltaDays) => {
     const job = units.find((j) => j.id === jobId)
     const proj = projById.get(jobId)
     const span = proj && proj.spans[key]
-    if (!job || !span) return
+    if (!job || !span || !stationActualsEnabled) return
     const running = (job.stage || 'none') === key
     const onWork = (d, dir) => (cal.isWorkday(d) ? strip(d)
       : dir < 0 ? cal.prevWorkday(d) : cal.nextWorkday(d))
+    const label = `${job.unit} — ${STAGE_LABEL[key].toLowerCase()} on the floor`
 
-    if (mode === 'move' || (mode === 'start' && !running)) {
-      if (running || !pinsEnabled) return
+    if (mode === 'move' || mode === 'start') {
       const start = onWork(addDays(span.start, deltaDays), deltaDays)
-      const patch = { pins: { ...job.pins, [key]: start } }
-      // The left edge moves the start and holds the finish, so it resizes too.
+      const patch = { actuals: { ...job.actuals, [key]: start } }
       if (mode === 'start') {
-        const days = workdaysInclusive(start > span.end ? strip(span.end) : start, span.end, cal)
+        // The left edge moves the start and holds the finish, so it resizes too.
+        const days = Math.max(1,
+          workdaysInclusive(start > span.end ? strip(span.end) : start, span.end, cal))
         const built = (stepsByJob.get(jobId) || {})[key]
-        if (!(built && built.length)) patch[key] = Math.max(1, days)
+        if (built && built.length) {
+          // A station built from steps is as long as its steps; a length written
+          // here would be ignored and the edge would spring back.
+        } else if (running) {
+          patch.daysLeft = runFromDaysToGo(job, today, days, cal)
+        } else {
+          patch.actualDays = { ...job.actualDays, [key]: days }
+        }
       }
-      // Dragging here writes a pin, and a pin means two different things to the
-      // two schedulers. The plan honours it verbatim; the projection treats it
-      // as an earliest, never booking work before today or before capacity can
-      // take it. So a pin the projection will ignore moves only the planned bar
-      // in the lane above -- the bar under the pointer springs back and the one
-      // nobody grabbed jumps to a date nobody pointed at.
-      //
-      // Rather than guess where that floor is, try the pin and look: project
-      // again with it applied and keep it only if the bar being dragged
-      // actually moved. Once per release, not per pointer move.
-      if (mode === 'move' && !projectionMoves(jobId, key, patch, span)) return
-      saveDrag('job', jobId, patch, `${job.unit} — projected ${STAGE_LABEL[key].toLowerCase()}`)
+      saveDrag('job', jobId, patch, label)
       return
     }
     if (mode !== 'end') return
@@ -992,10 +1012,10 @@ export default function App() {
     // written and then ignored, so the bar would spring back.
     const built = (stepsByJob.get(jobId) || {})[key]
     if (built && built.length) return
-    if (days !== job[key]) {
-      saveDrag('job', jobId, { [key]: days }, `${job.unit} — projected ${STAGE_LABEL[key].toLowerCase()}`)
+    if (days !== (job.actualDays && job.actualDays[key] != null ? job.actualDays[key] : job[key])) {
+      saveDrag('job', jobId, { actualDays: { ...job.actualDays, [key]: days } }, label)
     }
-  }, [units, projById, stepsByJob, cal, today, pinsEnabled, saveDrag, projectionMoves])
+  }, [units, projById, stepsByJob, cal, today, stationActualsEnabled, saveDrag])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
   // Closed stations by unit, then by station.
@@ -1520,7 +1540,7 @@ export default function App() {
       onDragStage={pinsEnabled ? dragStage : undefined}
       steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
       onDragStep={stepsEnabled ? dragStep : undefined}
-      onDragProjected={trackingEnabled ? dragProjected : undefined}
+      onDragProjected={trackingEnabled && stationActualsEnabled ? dragProjected : undefined}
       onToggleOpen={() => setOpenUnits((o) => {
         const n = new Set(o)
         if (n.has(j.id)) n.delete(j.id); else n.add(j.id)
@@ -1579,8 +1599,8 @@ export default function App() {
         <div>▼ Delivery</div>
         {trackingEnabled && <div><span className="lanekey" />Plan over projection</div>}
         {pinsEnabled && <div><span className="chip pinchipkey" />Placed by hand</div>}
-        {stepActualsEnabled && trackingEnabled
-          && <div><span className="chip actualkey" />Step recorded, not worked out</div>}
+        {(stepActualsEnabled || stationActualsEnabled) && trackingEnabled
+          && <div><span className="chip actualkey" />Reported by the shop</div>}
         <div><span className="chip offchip" />Shop closed</div>
         <label className="sortpick">Sort rows by
           <select value={boardSort} onChange={(e) => pickSort(e.target.value)}>
@@ -1600,6 +1620,10 @@ export default function App() {
           ? <div className="hint">Drag the board to pan it; drag a planned bar to place a stage by hand, or an edge to change its days.
               <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes a drag</div>
           : <div className="hint bad">Dragging stages needs the <code>*_pinned_start</code> columns on <code>jobs</code> — see supabase/schema.sql</div>}
+        {trackingEnabled && !stationActualsEnabled && (
+          <div className="hint bad">Reporting a station on the floor needs the <code>*_actual_start</code> and
+            {' '}<code>*_actual_days</code> columns on <code>jobs</code> — see supabase/schema.sql</div>
+        )}
       </div>
 
       <div ref={boardRef} className={`boardwrap${panning ? ' panning' : ''}`}
@@ -1894,6 +1918,25 @@ export default function App() {
               </span>
               {sel.conflict && <span className="bad">A stage sits across one that has to come before
                 it. Move it, or release the pin.</span>}
+            </div>
+          )}
+          {stationActualsEnabled && hasActuals(sel) && (
+            <div className="pinline">
+              <span>Reported by the shop — the projection takes these as they are, and the plan
+                above them does not move:</span>
+              <span className="pins">
+                {OPS.filter((o) => (sel.actuals && sel.actuals[o.key])
+                  || (sel.actualDays && sel.actualDays[o.key] != null)).map((o) => (
+                  <span key={o.key} className="pintag" style={{ borderColor: o.color, color: o.color }}>
+                    {SHORT[o.key]}
+                    {sel.actuals && sel.actuals[o.key] ? ` ${fmt(sel.actuals[o.key])}` : ''}
+                    {sel.actualDays && sel.actualDays[o.key] != null ? ` · ${sel.actualDays[o.key]} d` : ''}
+                    <button onClick={() => clearActual(sel, o.key)}
+                      title={`Let the projection work ${o.label.toLowerCase()} out again`}>×</button>
+                  </span>
+                ))}
+                <button className="btn sm" onClick={() => clearAllActuals(sel)}>Clear all</button>
+              </span>
             </div>
           )}
           {selDrift && (
@@ -3296,9 +3339,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           // happening now, so it can be shortened or lengthened but not moved.
           const running = (j.stage || 'none') === o.key
           const built = Boolean(steps && steps[o.key].length)
+          // The floor has said where this one goes, rather than the projection
+          // working it out. Marked the way a stage placed by hand is marked,
+          // because it is the same kind of statement.
+          const recorded = Boolean((j.actuals && j.actuals[o.key])
+            || (j.actualDays && j.actualDays[o.key] != null))
           return (
             <div key={`p-${o.key}`}
-              className={`bar proj${ringReason[o.key] ? ' behind' : ''}`
+              className={`bar proj${ringReason[o.key] ? ' behind' : ''}${recorded ? ' actual' : ''}`
                 + `${onDragProjected ? ' draggable' : ''}${running ? ' running' : ''}${liveProj ? ' dragging' : ''}`}
               onPointerDown={onDragProjected ? (e) => down(e, 'proj', o.key) : undefined}
               onPointerMove={onDragProjected ? move : undefined}
@@ -3306,13 +3354,15 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
               onPointerCancel={onDragProjected ? up : undefined}
               title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
                 + (ringReason[o.key] ? ` — ${ringReason[o.key]}` : '')
+                + (recorded ? ' — recorded by the shop, not worked out' : '')
                 + (!onDragProjected ? ''
-                  : running ? '. Running now — drag the right edge to change the days left'
-                  : built ? '. Drag to place it; its length comes from its steps'
-                  : '. Drag to place it, drag an edge to change its days')}
+                  : running ? '. Drag to say when the rest of it runs, or the right edge for the days left'
+                  : built ? '. Drag to say when it really runs; its length comes from its steps'
+                  : '. Drag to say when it really runs, or an edge for how long it really takes')
+                + (onDragProjected ? '. The planned bar above does not move' : '')}
               style={{ left: x + 1, width: w - 3, top: projTop,
                 background: o.light, borderColor: o.color, color: o.color }}>
-              {onDragProjected && !running && <span className="grip l" />}
+              {onDragProjected && <span className="grip l" />}
               {onDragProjected && !(built && !running) && <span className="grip r" />}
             </div>
           )
@@ -3546,7 +3596,11 @@ function Style() {
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
     .bar.proj { top: 24px; height: 13px; border: 1px solid; }
     .bar.proj.draggable { cursor: grab; touch-action: none; }
-    .bar.proj.draggable.running { cursor: default; }
+    /* Recorded by the shop rather than worked out -- the heavier border and dot
+       a stage placed by hand carries, because it says the same kind of thing. */
+    .bar.proj.actual { border-width: 2px; }
+    .bar.proj.actual::after { content: ''; position: absolute; left: 3px; top: 50%; margin-top: -2px;
+      width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
     .bar.proj.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
     .bar.proj.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
     /* This station is behind: its planned dates have gone by with the work not
