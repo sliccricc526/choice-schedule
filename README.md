@@ -219,10 +219,10 @@ Three things follow from what the lower block is:
   projection puts it.
 - **A station with nothing left to project has no lower block** — one the unit has already passed,
   a finished unit, or a running station with no days left. The plan block is still drawn.
-- **On the station in progress the two blocks can disagree in length.** Its projected bar is as long
-  as the days the shop says are left; its steps are as long as the longest chain through whatever
-  has not been ticked off. When the steps run longer the block overhangs its bar, and the step that
-  overhangs says so when you hover it. Everywhere else the two end on the same day.
+- **The station always covers its own steps**, including the one in progress. Its bar used to be as
+  long as the days the shop said were left, which could be shorter than the work still in it; now
+  the steps decide and the bar follows them. Days left still runs a station that has not been broken
+  down.
 
 **The two blocks hold two different things, and a drag on one never writes the other.** The planned
 block is what the customer was promised and what the shop intends to do: a step's *wait* and its
@@ -242,6 +242,17 @@ waits on it, because a piece of work cannot begin before the piece it waits on h
 that has its *own* recorded date does not get pushed — two facts are allowed to overlap, since the
 shop does start a follow-on early, and the board reports what happened rather than overruling it.
 
+**Break a work order down and the steps drive it.** The station is the outline; the steps are the
+work. That has always been true of the planned bar, whose length is the longest chain through its
+steps rather than a number anybody types. It is now true of the projected bar as well: it covers
+exactly what its steps cover. Drag a projected step past the end and fabrication grows with it, and
+paint and assembly slide in behind; drag it back, or shorten it, and fabrication comes back in. A
+station with no steps is unaffected — it still runs its days left, or its booked days, and its edge
+still drags.
+
+The one thing that does not move is the plan. The projected bar follows its projected steps; the
+planned bar follows its planned steps; neither lane reaches across.
+
 **A recorded date can sit anywhere**, including before the station's remaining work is due to begin —
 that is how you say a job got a head start. The board widens its own date range to keep the bar in
 view. A step that has been ticked off disappears from the projection as before, *unless* something
@@ -256,8 +267,9 @@ both blocks exactly as before and a projected step simply does not drag.
 
 Two consequences worth knowing:
 
-- A station built from steps **cannot be stretched by dragging its edge**, because its length comes
-  from its steps. Drag the middle to move it as usual; change the steps to change how long it takes.
+- A station built from steps **cannot be stretched by dragging its edge**, on either lane, because
+  its length comes from its steps. Drag the middle to move it as usual; change the steps to change
+  how long it takes.
 - **Ticking a step does not shorten the station.** Done says the work happened, not that it took no
   time. Days left on a station is still its own figure, counted from the day the station started.
 
