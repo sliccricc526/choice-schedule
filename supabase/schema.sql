@@ -131,6 +131,24 @@ create table if not exists public.job_steps (
 );
 create index if not exists job_steps_job_stage on public.job_steps (job_id, stage, position);
 
+-- Where a step's work actually lands, and how long it actually takes, as
+-- against the `days` and `lag` above -- which are the plan. The board draws
+-- every unit's steps twice: once under the planned station bar and once under
+-- the projected one. A drag on the projected block writes these two and never
+-- `days` or `lag`, because `lag` feeds the station's critical path through
+-- stepPlan, and the plan is scheduled backward from delivery -- so recording
+-- what the floor did would have moved the planned bars and changed the dates
+-- the unit was sold on.
+--
+-- `actual_start` is not past tense. The projected block carries work still to
+-- come, so the date is where the piece really lands, which may be next month.
+-- Null in either column means derived: the step sits where its prerequisites
+-- and its lag put it, which is what every step does until somebody says
+-- otherwise.
+alter table public.job_steps
+  add column if not exists actual_start date,
+  add column if not exists actual_days  int check (actual_days is null or actual_days >= 1);
+
 -- Shop calendar. A row overrides the Mon-Fri default for one day: working=false
 -- closes the shop (holiday, shutdown), working=true opens a weekend for
 -- overtime. Days with no row follow the default, so this table stays small.
