@@ -230,13 +230,29 @@ is drawn outlined: where each piece of work is actually expected to land, measur
 station's projected start. A row therefore splits into a plan half and a projection half, and the
 gap between a step in one and the same step in the other is how far that piece of work has moved.
 
+#### When each step really ran
+
+A step records the same pair of dates a station does — **when the subassembly actually started and
+when it actually came off**. Both are typed under the step in the unit panel and in the table
+(*ran … to …*), or dragged on the board. That is the point of breaking a work order down: the extra
+detail is only worth having if the real timing can be entered against it, one subassembly at a time.
+
+Ticking a step done is the shorthand for the common case. It stamps the finish as today and counts
+the start back off it from the length the step carries, so one tick records a whole span — and it
+never overwrites a date somebody has already entered by hand. Empty means derived, exactly as it
+does on a station: the step sits where its prerequisites and its lag put it.
+
+The two dates own the step's length whenever both are known; the day count beside them is only what
+they come to, never a second opinion about it. **Clear** forgets all of it and hands the step back
+to the plan.
+
 Three things follow from what the lower block is:
 
-- **A step already ticked off does not appear in the projection**, unless something has been
-  recorded against it. It is not work still to come, so it stays in the plan block above, struck
-  through and outlined, where it belongs to the record rather than to the forecast. For the station
-  in progress this is what makes the block read correctly: what is left of it runs from where the
-  projection puts it.
+- **A step already ticked off does not appear in the projection**, unless a date has been recorded
+  against it. It is not work still to come, so it stays in the plan block above, struck through and
+  outlined, where it belongs to the record rather than to the forecast. For the station in progress
+  this is what makes the block read correctly: what is left of it runs from where the projection
+  puts it.
 - **A station with nothing left to project has no lower block** — one the unit has already passed,
   a finished unit, or a running station with no days left. The plan block is still drawn.
 - **The station always covers its own steps**, including the one in progress. Its bar used to be as

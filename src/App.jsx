@@ -42,6 +42,10 @@ const onWorkday = (cal, d, dir) => (cal.isWorkday(d) ? strip(d)
 // its own way to be cleared.
 const stepDoneDates = (row, done, today, cal) => {
   if (!done) return { actual_finish: null }
+  // Neither date is overwritten if it is already there. The tick is the quick
+  // way to record a step that ran as booked; somebody who has typed the real
+  // dates in has said something more precise, and it stands.
+  if (row.actual_finish) return {}
   const fin = cal.isWorkday(today) ? strip(today) : cal.prevWorkday(today)
   const n = Math.max(1, row.actual_days == null ? (row.days || 1) : row.actual_days)
   return {
@@ -631,6 +635,24 @@ export default function App() {
   // without the unit it is on.
   const stepLabel = (sched, st) => `${sched.unit} — ${st.name || 'unnamed step'}`
 
+  // A step's recorded reality is a pair of dates, the way a station's is: when
+  // the subassembly actually started and when it actually came off. `days` and
+  // `lag` beside them are the plan and are never touched from here.
+  //
+  // `actual_days` is kept in step with the pair rather than being a third
+  // opinion about the same thing -- whenever both dates are known they own the
+  // length, and the number is only what they come to.
+  const saveStepDates = useCallback((sched, st, which, date) => {
+    if (!stepDatesEnabled) return
+    const start = which === 'start' ? date : st.actualStart
+    const finish = which === 'finish' ? date : st.actualFinish
+    saveDrag('step', st.id, {
+      actual_start: start ? isoDate(start) : null,
+      actual_finish: finish ? isoDate(finish) : null,
+      actual_days: start && finish && finish >= start ? workdaysInclusive(start, finish, cal) : null,
+    }, `${stepLabel(sched, st)} — when it really ran`)
+  }, [stepDatesEnabled, cal, saveDrag])
+
   const addStep = useCallback(async (job, stage) => {
     const cur = (steps || []).filter((r) => r.job_id === job.id && r.stage === stage)
     // A station being broken down for the first time keeps the length it
@@ -1104,8 +1126,21 @@ export default function App() {
     // nobody has written yet reads undefined -- which is dropped from the
     // request rather than sent as null, so the first undo on a step would have
     // done nothing at all.
+    // All three keys every time, even when only one of them moved. The undo
+    // entry is built from the keys of the patch and read off the stored row,
+    // and a column nobody has written yet reads undefined -- which is dropped
+    // from the request rather than sent as null, so the first undo on a step
+    // would have done nothing at all. `actual_finish` has to be in here too:
+    // it owns the step's end, so a drag that left it behind would move the bar
+    // and have it snap straight back to the recorded finish.
     const record = (patch, what) => saveDrag('step', stepId,
-      { actual_start: null, actual_days: null, ...patch }, `${stepLabel(sched, step)} — ${what}`)
+      { actual_start: null, actual_days: null, actual_finish: null, ...patch },
+      `${stepLabel(sched, step)} — ${what}`)
+    // What a pair of dates comes to, so the length never disagrees with them.
+    const pair = (from, to) => ({
+      actual_start: isoDate(from), actual_finish: isoDate(to),
+      actual_days: workdaysInclusive(from, to, cal),
+    })
     // The day the pointer landed on, rounded onto a working day the way it was
     // dragged. A step cannot start on a day the shop is shut.
 
@@ -1113,7 +1148,7 @@ export default function App() {
       const end = onWorkday(cal, addDays(span.end, deltaDays), deltaDays)
       const days = Math.max(1,
         workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
-      if (onProj) { if (days !== span.days) record({ actual_days: days }, 'days it takes') }
+      if (onProj) { if (days !== span.days) record(pair(strip(span.start), end < span.start ? strip(span.start) : end), 'when it finished') }
       else if (days !== step.days) saveDrag('step', stepId, { days }, stepLabel(sched, step))
       return
     }
@@ -1125,14 +1160,14 @@ export default function App() {
       // station's remaining work does is the whole point of it.
       const at = onWorkday(cal, addDays(span.start, deltaDays), deltaDays)
       if (mode === 'start') {
-        const from = at > span.end ? strip(span.end) : at
-        record({ actual_start: isoDate(from), actual_days: Math.max(1, workdaysInclusive(from, span.end, cal)) },
-          'when it runs and how long')
+        // The left edge moves the start and holds the finish.
+        record(pair(at > span.end ? strip(span.end) : at, strip(span.end)), 'when it started')
         return
       }
+      // The middle takes the whole piece with it, both ends together, so its
+      // length survives the move.
       if (isoDate(at) !== (step.actualStart ? isoDate(step.actualStart) : null)) {
-        record({ actual_start: isoDate(at), ...(step.actualDays == null ? {} : { actual_days: step.actualDays }) },
-          'when it runs')
+        record(pair(at, shiftWorkdays(cal, at, Math.max(1, span.days) - 1)), 'when it runs')
       }
       return
     }
@@ -1957,6 +1992,7 @@ export default function App() {
             return n
           })}
           onSaveStep={saveStep} onToggleNeed={toggleNeed}
+          stepDates={stepDatesEnabled} onSaveStepDates={saveStepDates}
           showDone={showDone} onToggleDone={toggleDone}
           columnOrder={columnOrder} onMoveColumns={moveColumns}
           columnWidths={columnWidths} onResizeColumns={resizeColumns} />
@@ -2050,24 +2086,47 @@ export default function App() {
                             <span className="stepat" title="Working day of the station this step starts on">
                               day {off + 1}
                             </span>
-                            {/* What the shop has recorded against this step, as
-                                against the planned day beside it. The only
-                                place it can still be read once the station
-                                closes and its projected block goes away. */}
-                            {stepActualsEnabled && (st.actualStart || st.actualDays != null || st.actualFinish) && (
-                              <span className="steptag" title="Recorded on the board, not worked out from the plan">
-                                {st.actualStart ? fmt(st.actualStart) : 'length'}
-                                {st.actualFinish ? ` – ${fmt(st.actualFinish)}` : ''}
-                                {st.actualDays != null ? ` · ${st.actualDays} d` : ''}
-                                <button type="button" title="Clear it and let the board work it out again"
-                                  onClick={() => saveDrag('step', st.id,
-                                    { actual_start: null, actual_days: null, actual_finish: null },
-                                    `${sel.unit} — ${st.name || 'unnamed step'} — recorded dates`)}>×</button>
+                            {stepActualsEnabled && st.actualDays != null
+                              && !(st.actualStart && st.actualFinish) && (
+                              <span className="steptag" title="A length recorded without dates">
+                                {st.actualDays} d
                               </span>
                             )}
                             <button className="stepdel" title="Remove this step"
                               onClick={() => removeStep(st.id)}>×</button>
                           </div>
+                          {/* When the subassembly really ran. Breaking a station
+                              down is a request for more detail about this one
+                              unit, so the detail has to be enterable and not
+                              only draggable: a foreman reading a date off a
+                              traveller should be able to type it. Empty means
+                              derived, exactly as it does on a station. */}
+                          {trackingEnabled && stepDatesEnabled && (
+                            <div className="stepdates">
+                              <span className="nlab">ran</span>
+                              <input type="date" className="dateedit" value={st.actualStart ? isoDate(st.actualStart) : ''}
+                                max={st.actualFinish ? isoDate(st.actualFinish) : undefined}
+                                title={`When ${st.name || 'this step'} actually started`}
+                                onChange={(e) => saveStepDates(sel, st, 'start',
+                                  e.target.value ? parseDate(e.target.value) : null)} />
+                              <span className="nlab">to</span>
+                              <input type="date" className="dateedit" value={st.actualFinish ? isoDate(st.actualFinish) : ''}
+                                min={st.actualStart ? isoDate(st.actualStart) : undefined}
+                                title={`When ${st.name || 'this step'} actually came off`}
+                                onChange={(e) => saveStepDates(sel, st, 'finish',
+                                  e.target.value ? parseDate(e.target.value) : null)} />
+                              {(st.actualStart || st.actualFinish || st.actualDays != null) && (
+                                <button type="button" className="clr"
+                                  title="Clear them and let the board work this step out again"
+                                  onClick={() => saveDrag('step', st.id,
+                                    { actual_start: null, actual_days: null, actual_finish: null },
+                                    `${stepLabel(sel, st)} — when it really ran`)}>clear</button>
+                              )}
+                              {st.actualStart && st.actualFinish && (
+                                <span className="ran">{st.actualDays} d</span>
+                              )}
+                            </div>
+                          )}
                           {list.length > 1 && (
                             <div className="stepneeds">
                               <span className="nlab">waits for</span>
@@ -2310,7 +2369,8 @@ function SignIn() {
 
 function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
-  showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns }) {
+  showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns,
+  stepDates, onSaveStepDates }) {
   // The standard this unit's model builds to, for saying where the unit has
   // drifted off it. A unit with no part number has no standard to drift from.
   const partById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
@@ -2680,6 +2740,22 @@ function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApp
                   <span className="dlabel">d</span>
                 </span>
                 <span className="tdates">{fmt(x.start)} – {fmt(x.end)}</span>
+                {tracking && stepDates && (
+                  <span className="stepdates inline">
+                    <span className="nlab">ran</span>
+                    <input type="date" className="dateedit" value={x.actualStart ? isoDate(x.actualStart) : ''}
+                      max={x.actualFinish ? isoDate(x.actualFinish) : undefined}
+                      title={`When ${x.name || 'this step'} actually started`}
+                      onChange={(e) => onSaveStepDates(j, x, 'start',
+                        e.target.value ? parseDate(e.target.value) : null)} />
+                    <span className="nlab">to</span>
+                    <input type="date" className="dateedit" value={x.actualFinish ? isoDate(x.actualFinish) : ''}
+                      min={x.actualStart ? isoDate(x.actualStart) : undefined}
+                      title={`When ${x.name || 'this step'} actually came off`}
+                      onChange={(e) => onSaveStepDates(j, x, 'finish',
+                        e.target.value ? parseDate(e.target.value) : null)} />
+                  </span>
+                )}
                 {list.length > 1 && (
                   <span className="stepneeds inline">
                     <span className="nlab">waits for</span>
@@ -4102,6 +4178,19 @@ function Style() {
     .steprow { display: flex; align-items: center; gap: 7px; padding: 2px 0 2px 4px; }
     .stepat { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 40px; }
     .stepneeds { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px 0 1px 29px; }
+    /* when the subassembly really ran, on a line of its own: the row above is
+       already the name, the length and the day of the station it starts on */
+    .stepdates { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 2px 0 1px 29px; }
+    /* .dateedit fills its cell in the stage table; here it is one field among
+       several on a line, so it takes only the width a date needs */
+    .stepdates .dateedit { width: auto; min-width: 0; flex: none; font-size: 11px; padding: 2px 4px; }
+    .stepdates .nlab { font-size: 10px; color: #9AA4AB; }
+    .stepdates .ran { font-size: 10px; font-weight: 700; color: #44688F; background: #E3EAF2;
+      border-radius: 3px; padding: 1px 5px; }
+    .stepdates .clr { border: 0; background: none; cursor: pointer; font-family: inherit;
+      font-size: 10px; color: #7A848C; text-decoration: underline; padding: 0 2px; }
+    .stepdates .clr:hover { color: #B3382E; }
+    .stepdates.inline { padding: 0; flex: none; }
     .stepneeds .nlab, .stepneeds em { font-size: 10px; color: #9AA4AB; font-style: normal; }
     .needchip { font-family: inherit; font-size: 10px; max-width: 132px; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; border: 1px solid #C6CDD1; background: #FFF;
