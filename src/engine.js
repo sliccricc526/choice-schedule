@@ -211,7 +211,13 @@ export function shiftWorkdays(cal, from, n) {
 // anything the shop has reported on, because a recorded fact is worth drawing
 // wherever it landed. Defined once so the bars, the drag and the station length
 // that has to contain them cannot disagree about what is in the block.
-export const projectedSteps = (steps) => (steps || []).filter((s) => !s.done || s.actualStart)
+export const projectedSteps = (steps) =>
+  (steps || []).filter((s) => !s.done || s.actualStart || s.actualFinish)
+
+// A recorded finish, rounded to a working day. Backwards, unlike a start: the
+// day the work was done on is the last working day at or before the date, not
+// the next one after it.
+const finishOn = (cal, d) => (!d ? null : cal.isWorkday(d) ? strip(d) : cal.prevWorkday(d))
 
 export function stepActualSpans(start, steps, cal = defaultCalendar) {
   const list = steps || []
@@ -228,7 +234,8 @@ export function stepActualSpans(start, steps, cal = defaultCalendar) {
   let cycle = false
   const visit = (s) => {
     if (state.get(s.id) === 2) return span.get(s.id)
-    const days = Math.max(1, s.actualDays == null ? (s.days || 1) : s.actualDays)
+    let days = Math.max(1, s.actualDays == null ? (s.days || 1) : s.actualDays)
+    const fin = finishOn(cal, s.actualFinish)
     // A step reached while it is still being visited is waiting on itself.
     // Answer the way stepPlan does -- as though it began with the station, so
     // its length still counts against whatever asked -- rather than dropping
@@ -237,7 +244,16 @@ export function stepActualSpans(start, steps, cal = defaultCalendar) {
     if (state.get(s.id) === 1) { cycle = true; return { start: base, end: on(base, days - 1) } }
     state.set(s.id, 1)
     let from = base
-    if (!s.actualStart) {
+    if (s.actualStart) {
+      from = cal.isWorkday(s.actualStart) ? strip(s.actualStart) : cal.nextWorkday(s.actualStart)
+    } else if (fin) {
+      // Finished, with nobody having said when it began. Ticking a step records
+      // both ends, so this is a step whose start was cleared by hand or one
+      // closed before the finish was kept: count its length back off the one
+      // date there is rather than leaving it sitting at the station's start,
+      // which would draw it in the wrong fortnight.
+      from = on(fin, -(days - 1))
+    } else {
       ;(s.needs || []).forEach((id) => {
         const n = byId.get(id)
         if (!n) return
@@ -253,15 +269,19 @@ export function stepActualSpans(start, steps, cal = defaultCalendar) {
       // and none of it happens in the past. A step with a recorded date is the
       // exception and keeps it -- that is the shop reporting it already ran.
       if (from < base) from = base
-    } else {
-      from = cal.isWorkday(s.actualStart) ? strip(s.actualStart) : cal.nextWorkday(s.actualStart)
     }
+    // A recorded finish owns the end, and with a recorded start either side of
+    // it the length is no longer anybody's estimate -- it is the two dates. A
+    // finish earlier than the start is somebody mid-correction, so it gives way
+    // rather than drawing a bar backwards.
+    const end = fin && fin > from ? fin : on(from, days - 1)
+    if (fin) days = workdaysInclusive(from, end, cal)
     const out = {
       // `days` after the spread on purpose: stepLanes packs lanes off this
       // field, not off the dates, so the effective length has to be the one it
       // reads or a bar drawn at its actual length is packed at its planned one.
-      ...s, days, fixed: Boolean(s.actualStart),
-      offset: cal.workdaysBetween(base, from), start: from, end: on(from, days - 1),
+      ...s, days, fixed: Boolean(s.actualStart || fin),
+      offset: cal.workdaysBetween(base, from), start: from, end,
     }
     state.set(s.id, 2)
     span.set(s.id, out)
@@ -740,6 +760,58 @@ export function projectSchedule(jobs, caps, today, cal = defaultCalendar, stepsB
       daysRemaining: work.reduce((n, w) => n + w.days, 0),
       spent: daysSpent(job, today, cal),
     })
+  })
+  return out
+}
+
+// --- What the projection lane draws ---------------------------------------
+// `spans` above is work still to do: it begins at today and a closed station
+// has none of it, which is right for scheduling and wrong for looking at. The
+// bar wants the whole life of the station -- the day it really started through
+// to where it is really going -- so the date line crosses it and the two halves
+// can be told apart. Kept beside `spans` rather than folded into it because six
+// other things read `spans` and all of them mean remaining work: the drag, the
+// step anchor, the floor load row, the late ring, the variance and the
+// projected finish. Widening it there would quietly change every one.
+//
+// `actualEnd` is the last day that has actually happened. Null means none of it
+// has; equal to `end` means all of it has.
+export function lifeSpans(job, proj, log, today, cal = defaultCalendar) {
+  const out = {}
+  const stage = job.stage || 'none'
+  const at = stage === 'none' ? -1 : STAGE_AT[stage]
+  OPS.forEach((op, i) => {
+    const rec = log && log[op.key]
+    const span = proj && proj.spans && proj.spans[op.key]
+    const closed = stage === 'done' || (at >= 0 && i < at)
+    if (closed) {
+      // A finish with no start is a row written before the dates were kept, or
+      // a database still missing the columns. Count the days it took back off
+      // the finish rather than drawing nothing: the length is the fact that
+      // survived, and a bar in roughly the right fortnight beats a blank lane.
+      if (!rec || !rec.finished) return
+      const end = strip(rec.finished)
+      const start = rec.started ? strip(rec.started)
+        : shiftWorkdays(cal, end, -(Math.max(1, rec.actualDays || 1) - 1))
+      out[op.key] = { start: start > end ? end : start, end, actualEnd: end, state: 'closed' }
+      return
+    }
+    if (!span) return
+    if (i === at) {
+      // Under way. The bar runs from the day the shop says it started; the day
+      // before today is the last one that has happened, so the hatching stops
+      // exactly where the date line falls rather than a column either side.
+      const start = job.stageStarted ? strip(job.stageStarted) : strip(span.start)
+      const was = cal.prevWorkday(today)
+      out[op.key] = {
+        start: start > span.end ? strip(span.end) : start,
+        end: span.end,
+        actualEnd: was < start ? null : was,
+        state: 'running',
+      }
+      return
+    }
+    out[op.key] = { start: span.start, end: span.end, actualEnd: null, state: 'ahead' }
   })
   return out
 }
