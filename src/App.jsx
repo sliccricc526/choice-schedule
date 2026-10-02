@@ -3560,15 +3560,34 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
   // back where it came from.
   const [drag, setDrag] = useState(null)
   const dragRef = useRef(null)
-  const snap = drag ? Math.round(drag.dx / COL) * COL : 0
-  // Where a bar being moved will actually land, worked out the same way the
-  // release works it out, so the preview cannot promise a day the release will
-  // not give. Drag onto a Saturday and the bar visibly stays put rather than
-  // sliding there and springing back to Friday -- or, as it used to, leaping
-  // over the weekend to Monday for a one-column drag.
+  // How many columns the gesture has bought, and the only place that is worked
+  // out -- the preview and the release both read it, so the preview cannot
+  // promise a day the release will not give.
+  //
+  // An edge is measured against the column the pointer is *in*, not against how
+  // far it has travelled. A bar is drawn `left: x + 1, width: w - 3`, so its
+  // right edge sits two pixels inside the right boundary of its finish day and
+  // the grip is the last seven pixels of that: the pointer goes down two-thirds
+  // of the way across the column it grabbed. Rounding the distance travelled
+  // then carried that offset into wherever it was dropped, so releasing on the
+  // left of a column gave the day before it -- the finish landed a day early
+  // unless the drop happened to fall past the middle. Counting columns from the
+  // grabbed column's own left boundary gives the day under the pointer wherever
+  // in the column it is let go.
+  //
+  // A bar grabbed by its middle has no edge to line up, so it keeps moving by
+  // the columns the pointer moved.
+  const cols = (d) => (!d ? 0
+    : d.mode === 'move' ? Math.round(d.dx / COL)
+    : Math.floor((d.x0 + d.dx - d.edge0) / COL))
+  const snap = cols(drag) * COL
+  // Where a bar being moved will actually land. Drag onto a Saturday and the
+  // bar visibly stays put rather than sliding there and springing back to
+  // Friday -- or, as it used to, leaping over the weekend to Monday for a
+  // one-column drag.
   const previewX = (from) => {
-    const cols = Math.round(snap / COL)
-    return dayIndex(onWorkday(cal, addDays(from, cols), cols)) * COL
+    const n = cols(drag)
+    return dayIndex(onWorkday(cal, addDays(from, n), n)) * COL
   }
 
   // One gesture, four kinds of bar -- the two station lanes and the two blocks
@@ -3582,7 +3601,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
     e.preventDefault()
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    const d = { lane, key, stepId, mode, x0: e.clientX, dx: 0 }
+    // The left boundary, in client pixels, of the column the grabbed edge sits
+    // in -- the fixed reference the column count is measured from. Taken from
+    // the bar rather than the grip, and taken now, before the preview starts
+    // moving it. The bar's drawn edges sit one pixel inside their column on the
+    // left and two on the right, which is what the offsets undo.
+    const r = e.currentTarget.getBoundingClientRect()
+    const edge0 = mode === 'end' ? r.right + 2 - COL : r.left - 1
+    const d = { lane, key, stepId, mode, x0: e.clientX, dx: 0, edge0 }
     dragRef.current = d
     setDrag(d)
   }
@@ -3604,7 +3630,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
     dragRef.current = null
     setDrag(null)
     if (!d) return
-    const n = Math.round(d.dx / COL)
+    const n = cols(d)
     if (n === 0) return
     if (d.lane === 'splan' || d.lane === 'sproj') onDragStep(j.id, d.key, d.stepId, d.mode, n, d.lane)
     else if (d.lane === 'proj') onDragProjected(j.id, d.key, d.mode, n)
@@ -3843,7 +3869,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
                     : { background: op.light, borderColor: op.color, color: op.color }) }}>
                 {wasW > 0 && <i className="was" style={{ width: wasW }} />}
                 {drags && <><span className="grip l" /><span className="grip r" /></>}
-                <span>{st.name || '—'}</span>
+                <span className="nm">{st.name || '—'}</span>
               </div>
             )
           })))}
@@ -3967,21 +3993,27 @@ function Style() {
     /* the step lines under each unit; the lane sets each one's top in the markup */
     .bar.step { height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
       display: flex; align-items: center; padding: 0 4px; }
-    .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden;
+    /* The label, and only the label. A rule written for the step's span also
+       reaches its two grip spans, and giving those position: relative took them
+       out of the corners and dropped them side by side in the middle of the bar
+       -- a step could then not be resized at all, because grabbing an edge hit
+       the body and moved it instead. (The CSS lives in a template literal, so
+       there are no backticks in these comments.) */
+    .bar.step span.nm { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden;
       text-overflow: ellipsis; position: relative; z-index: 1; }
     /* A done step recedes in the plan lane, where it is no longer the forecast.
        In the projection it is history and history is the thing being read, so
        the hatching says it at full strength instead -- the same way a closed
        station's bar does. The struck-through label still says done in both. */
     .bar.step.splan.done { opacity: .55; }
-    .bar.step.done span { text-decoration: line-through; }
+    .bar.step.done span.nm { text-decoration: line-through; }
     .bar.step.draggable { cursor: grab; touch-action: none; }
     /* Placed by hand rather than worked out -- the same heavier border and dot
        a stage pinned by hand carries, because it says the same thing. */
     .bar.step.actual { border-width: 2px; }
     .bar.step.actual::before { content: ''; position: absolute; left: 2px; top: 50%; margin-top: -2px;
       width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-    .bar.step.actual span { margin-left: 6px; }
+    .bar.step.actual span.nm { margin-left: 6px; }
     .bar.step.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
     .bar.step .grip { top: -1px; bottom: -1px; }
     /* the only thing that says a unit has steps, so it has to be findable:
