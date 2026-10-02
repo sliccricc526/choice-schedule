@@ -3511,6 +3511,9 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
   // from, so the row divides into a plan half and a projection half. With the
   // unit collapsed this puts the projection back at 24px, exactly where it sits
   // on a row with no steps at all.
+  // The last day that has actually happened. The hatching on both lanes stops
+  // here, so the date line falls on the seam rather than a column either side.
+  const lastDone = cal.prevWorkday(new Date(todayT))
   const STEP_LANE = 18
   const planStepsTop = 23
   const projTop = planLanes ? planStepsTop + planLanes * STEP_LANE + 2 : 24
@@ -3753,7 +3756,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
               {/* what has already happened, against what is still forecast.
                   Hatched rather than filled: a solid fill is the planned lane's
                   and two solid bars stacked read as one thick one. */}
-              {wasW > 0 && <span className="was" style={{ width: wasW }} />}
+              {wasW > 0 && <i className="was" style={{ width: wasW }} />}
               {handle && <><span className="grip l" /><span className="grip r" /></>}
             </div>
           )
@@ -3799,6 +3802,17 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
             // one scale down: this is not where the board worked it out, it is
             // where it actually is.
             const recorded = kind === 'sproj' && (st.fixed || st.actualDays != null)
+            // How much of the step has actually happened, the same question the
+            // station bar above it answers. Only the projected lane asks it:
+            // the plan lane is what was promised and none of it is history.
+            // A recorded date can sit in the future -- `actual_start` is not
+            // past tense -- so a piece booked for next month stays plain until
+            // the day comes round.
+            const wasEnd = kind === 'sproj' && st.fixed && st.start <= lastDone
+              ? (st.end < lastDone ? st.end : lastDone) : null
+            const wasW = wasEnd
+              ? Math.max(0, Math.min(w - 3, (dayIndex(wasEnd) - dayIndex(st.start) + 1) * COL - 1))
+              : 0
             return (
               <div key={`${kind}-${st.id}`}
                 className={`bar step ${kind}${st.done ? ' done' : ''}${drags ? ' draggable' : ''}`
@@ -3827,6 +3841,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDate
                   ...(plan
                     ? { background: op.color, borderColor: op.light, color: '#FFF' }
                     : { background: op.light, borderColor: op.color, color: op.color }) }}>
+                {wasW > 0 && <i className="was" style={{ width: wasW }} />}
                 {drags && <><span className="grip l" /><span className="grip r" /></>}
                 <span>{st.name || '—'}</span>
               </div>
@@ -3952,8 +3967,13 @@ function Style() {
     /* the step lines under each unit; the lane sets each one's top in the markup */
     .bar.step { height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
       display: flex; align-items: center; padding: 0 4px; }
-    .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .bar.step.done { opacity: .55; }
+    .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; position: relative; z-index: 1; }
+    /* A done step recedes in the plan lane, where it is no longer the forecast.
+       In the projection it is history and history is the thing being read, so
+       the hatching says it at full strength instead -- the same way a closed
+       station's bar does. The struck-through label still says done in both. */
+    .bar.step.splan.done { opacity: .55; }
     .bar.step.done span { text-decoration: line-through; }
     .bar.step.draggable { cursor: grab; touch-action: none; }
     /* Placed by hand rather than worked out -- the same heavier border and dot
@@ -3987,7 +4007,7 @@ function Style() {
        bars stacked read as one thick one rather than as a plan and its outcome.
        currentColor is the station's own colour, so this costs no new palette
        and a late bar's red ring still reads over it. */
-    .bar.proj .was { position: absolute; left: 0; top: 0; bottom: 0; opacity: .5;
+    .bar .was { position: absolute; left: 0; top: 0; bottom: 0; opacity: .5;
       background: repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 5px); }
     .bar.proj.draggable { cursor: grab; touch-action: none; }
     /* Recorded by the shop rather than worked out -- the heavier border and dot

@@ -246,6 +246,15 @@ The two dates own the step's length whenever both are known; the day count besid
 they come to, never a second opinion about it. **Clear** forgets all of it and hands the step back
 to the plan.
 
+Step bars in the projection are **hatched over the part that has already happened**, exactly as the
+station bars above them are, and the hatching stops on the same date line. A step finished in the
+past is hatched end to end; one started and still running is hatched to the line and plain after it;
+one with nothing recorded, or recorded for a date still to come, is plain throughout — `actual_start`
+is not past tense, so a subassembly booked for next month stays plain until the day comes round. In
+the projection a done step is no longer faded, because there it *is* the history being read and the
+hatching already says so; in the plan lane above it still recedes, and its label is struck through
+in both.
+
 Three things follow from what the lower block is:
 
 - **A step already ticked off does not appear in the projection**, unless a date has been recorded
