@@ -3025,6 +3025,10 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
   const byJob = useMemo(() => new Map(jobs.map((j) => [j.id, j])), [jobs])
 
   const todayT = today.getTime()
+  // The part description is a column only where there is a catalog to read it
+  // from. part_numbers is optional, and a shop not using it should not get a
+  // column that is empty on every row.
+  const showPdesc = partsById.size > 0
 
   const sections = useMemo(() => {
     // The part number is what is written on the traveller, so it leads; the
@@ -3033,6 +3037,14 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
     const model = (j) => {
       const p = j && j.partId ? partsById.get(j.partId) : null
       return (p && p.part_number) || (j && j.desc) || ''
+    }
+    // What that part number is, as the catalog has it. Not the unit's own
+    // description: picking a part number copies its description onto the unit
+    // and the two are never linked again, so the unit's can be edited away from
+    // its model. A unit with no part number has no catalog entry to describe.
+    const pdesc = (j) => {
+      const p = j && j.partId ? partsById.get(j.partId) : null
+      return (p && p.description) || ''
     }
     return OPS.map((op) => {
       const rows = (stages || [])
@@ -3052,6 +3064,7 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
           return {
             ...s,
             model: model(j),
+            pdesc: pdesc(j),
             desc: (j && j.desc) || '',
             delivery: j ? j.delivery : null,
             due,
@@ -3089,11 +3102,15 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
   }, [stages, byJob, partsById, cal, todayT, showClosed])
 
   const STATE = { closed: 'Finished', active: 'In the shop now', pending: 'Not started' }
-  const HEAD = ['Unit', 'Model', 'Description', 'Station', 'Status', 'Planned start', 'Planned finish',
-    'Projected start', 'Projected finish', 'Working days vs plan', 'Delivery']
+  // Part description sits beside Model in the file as it does on the page, and
+  // is named apart from Description, which is the unit's own and can differ.
+  const HEAD = ['Unit', 'Model', ...(showPdesc ? ['Part description'] : []), 'Description', 'Station',
+    'Status', 'Planned start', 'Planned finish', 'Projected start', 'Projected finish',
+    'Working days vs plan', 'Delivery']
   const out = (d) => (d ? fmtNum(d) : '')
-  const line = (op, r) => [r.unit, r.model, r.desc, op.label, STATE[r.state], out(r.plan && r.plan.start),
-    out(r.due), out(r.start), out(r.finish), r.late == null ? '' : r.late, out(r.delivery)]
+  const line = (op, r) => [r.unit, r.model, ...(showPdesc ? [r.pdesc] : []), r.desc, op.label,
+    STATE[r.state], out(r.plan && r.plan.start), out(r.due), out(r.start), out(r.finish),
+    r.late == null ? '' : r.late, out(r.delivery)]
   const save = (secs, name) => downloadCsv(`${name}-due-dates-${isoDate(today)}.csv`,
     toCsv(HEAD, secs.flatMap((sec) => sec.rows.map((r) => line(sec.op, r)))))
   const slug = (op) => op.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')
@@ -3148,6 +3165,7 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
                 <thead>
                   <tr>
                     <th>Unit</th><th>Model</th>
+                    {showPdesc && <th>Part description</th>}
                     <th>Planned start</th>
                     <th title="The day this station has to be finished to keep the delivery date">Due</th>
                     <th>Projected start</th><th>Projected finish</th>
@@ -3161,6 +3179,9 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
                       className={`${r.state === 'active' ? 'onnow' : ''}${r.overdue ? ' overdue' : ''}`}>
                       <td className="strong">{r.unit}</td>
                       <td className={r.model ? '' : 'muted'} title={r.desc}>{r.model || '—'}</td>
+                      {showPdesc && (
+                        <td className={`pdesc${r.pdesc ? '' : ' muted'}`}>{r.pdesc || '—'}</td>
+                      )}
                       <td className={`n${r.overdue === 'start' ? ' blown' : ''}`}
                         title={r.overdue === 'start' ? `Overdue — ${overdueText('start', r.behind)}` : undefined}>
                         {date(r.plan && r.plan.start)}</td>
@@ -4209,6 +4230,13 @@ function Style() {
     .sechead .btn { margin-left: auto; }
     table.duedates td { padding: 7px 12px; }
     table.duedates td.due { font-weight: 700; }
+    /* Every report cell is nowrap, and this table scrolls sideways. Left that way
+       a long part description would widen it and push the dates -- the reason
+       the page exists -- out of view, so this one cell wraps: a long description
+       costs height, never width. The max-width is a preference, not a cap; a
+       table hands out spare width as it likes, so on a wide screen the column
+       may take more, and on a narrow one it gives way to the dates. */
+    table.duedates td.pdesc { white-space: normal; max-width: 260px; min-width: 140px; }
     table.duedates tr.onnow td { background: #FBF7EF; }
     /* Overdue outranks on-now: a station running inside its planned window is
        news, one that has run past it is work. Same ring as the board's bars. */
