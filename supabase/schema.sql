@@ -158,6 +158,25 @@ alter table public.job_steps
   add column if not exists actual_start date,
   add column if not exists actual_days  int check (actual_days is null or actual_days >= 1);
 
+-- The other end of it, and the only past-tense date a step has. `actual_start`
+-- above says where a step lands, which may be next month, so on its own it
+-- cannot place work that is already behind us -- and a station that has closed
+-- is nothing but work behind us.
+--
+-- With it, a step records the same pair of dates a station does: when the
+-- subassembly actually started and when it actually came off. Both are typed
+-- in the unit panel and the table, or dragged on the board. Ticking a step done
+-- is the shorthand -- it stamps the finish as today and counts the start back
+-- off it from the length the step carries -- and it never overwrites a date
+-- somebody has already entered.
+--
+-- `actual_days` is not a third opinion about the same thing: whenever both
+-- dates are known they own the length and it is only what they come to.
+-- Without this column a closed station draws its bar and no steps under it,
+-- which is what the board did before it existed.
+alter table public.job_steps
+  add column if not exists actual_finish date;
+
 -- Where each station really goes, and how long it really takes, as reported by
 -- the floor. Not the same thing as the `*_pinned_start` columns above: a pin is
 -- an instruction to the planner, honoured verbatim by the backward schedule, so

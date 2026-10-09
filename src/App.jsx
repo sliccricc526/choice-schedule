@@ -2,10 +2,12 @@ import { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef, Fra
 import { supabase, configured } from './supabase.js'
 import {
   OPS, strip, addDays, daysBetween, isWeekend, createCalendar, scheduleJob, levelSchedule,
-  isoDate, parseDate, projectSchedule, nextStage, daysSpent, daysToGo, runFromDaysToGo,
+  isoDate, parseDate, projectSchedule, nextStage, daysSpent, daysToGo,
+  runFromDaysToGo, stationRun,
   STAGE_LABEL, STAGE_RANK, stageDates,
   workdaysInclusive, hasPins, hasActuals, actualOf, actualDaysOf, shiftWorkdays,
   stepPlan, stepSpans, stepActualSpans, projectedSteps, stepLanes, stepDependsOn, stageOverdue,
+  lifeSpans,
   PRIORITY_DEFAULT, PRIORITY_MAX,
 } from './engine.js'
 
@@ -31,6 +33,26 @@ const onWorkday = (cal, d, dir) => (cal.isWorkday(d) ? strip(d)
 // to cover them, so its drawn start is not the place to lay them out -- that
 // would move the steps that moved the bar. `anchor` is only set on a station
 // that has steps; everywhere else the start is the anchor.
+// Ticking a step off is the only moment anybody says a piece of work really
+// happened, so it is the moment to record it. The finish is today; the start is
+// counted back off it from the length the step carries, because one date plus a
+// length is the whole fact and a finish on its own would draw a one-day bar in
+// the wrong place. Both stay editable afterwards. Un-ticking drops the finish
+// and leaves the start, which by then is a recorded date like any other and has
+// its own way to be cleared.
+const stepDoneDates = (row, done, today, cal) => {
+  if (!done) return { actual_finish: null }
+  // Neither date is overwritten if it is already there. The tick is the quick
+  // way to record a step that ran as booked; somebody who has typed the real
+  // dates in has said something more precise, and it stands.
+  if (row.actual_finish) return {}
+  const fin = cal.isWorkday(today) ? strip(today) : cal.prevWorkday(today)
+  const n = Math.max(1, row.actual_days == null ? (row.days || 1) : row.actual_days)
+  return {
+    actual_finish: isoDate(fin),
+    ...(row.actual_start ? {} : { actual_start: isoDate(shiftWorkdays(cal, fin, -(n - 1))) }),
+  }
+}
 const stationAnchor = (proj, key) => {
   const s = proj && proj.spans[key]
   return s ? (s.anchor || s.start) : null
@@ -180,6 +202,9 @@ export default function App() {
   // still works on a database that hasn't had the migration run against it.
   const [stageDatesEnabled, setStageDatesEnabled] = useState(true)
   const [stepActualsEnabled, setStepActualsEnabled] = useState(true)
+  // False until job_steps carries actual_finish. Ticking a step still works
+  // without it; the step just records no dates, which is what it did before.
+  const [stepDatesEnabled, setStepDatesEnabled] = useState(true)
   const [stationActualsEnabled, setStationActualsEnabled] = useState(true)
 
   const load = useCallback(async () => {
@@ -252,6 +277,8 @@ export default function App() {
       // switched off for good.
       setStepActualsEnabled(!tr.error && (trows.length === 0
         || Object.prototype.hasOwnProperty.call(trows[0], 'actual_start')))
+      setStepDatesEnabled(!tr.error && (trows.length === 0
+        || Object.prototype.hasOwnProperty.call(trows[0], 'actual_finish')))
       const srows = sr.error ? [] : (sr.data || [])
       setStageLog(srows)
       if (srows.length) setStageDatesEnabled(Object.prototype.hasOwnProperty.call(srows[0], 'started_on'))
@@ -480,16 +507,21 @@ export default function App() {
     if (e) { setError(e.message); load() }
   }, [load])
   const saveStep = useCallback((id, patch) => {
-    if (PLAN_STEP_KEYS.some((k) => patch[k] !== undefined)) {
-      const row = stepsRef.current.find((r) => r.id === id)
-      if (row) armPlanWatch(row.job_id, { kind: 'step', id, field: PLAN_STEP_KEYS.find((k) => patch[k] !== undefined) })
+    const row = stepsRef.current.find((r) => r.id === id)
+    if (PLAN_STEP_KEYS.some((k) => patch[k] !== undefined) && row) {
+      armPlanWatch(row.job_id, { kind: 'step', id, field: PLAN_STEP_KEYS.find((k) => patch[k] !== undefined) })
+    }
+    // Done is the one field that carries dates with it, and it is ticked from
+    // the panel and from the table, so it is caught here rather than at both.
+    if (patch.done !== undefined && stepDatesEnabled && row) {
+      patch = { ...patch, ...stepDoneDates(row, patch.done, today, cal) }
     }
     setSteps((ls) => ls.map((r) => (r.id === id ? { ...r, ...patch } : r)))
     if (!queuedSteps.current.has(id)) pendingWrites.current += 1
     queuedSteps.current.set(id, { ...(queuedSteps.current.get(id) || {}), ...patch })
     clearTimeout(stepTimers.current.get(id))
     stepTimers.current.set(id, setTimeout(() => flushStep(id), SAVE_AFTER))
-  }, [flushStep, armPlanWatch])
+  }, [flushStep, armPlanWatch, stepDatesEnabled, today, cal])
 
   // --- Undo, for drags on the board ---------------------------------------
   //
@@ -602,6 +634,24 @@ export default function App() {
   // A step reads as "WO-26-0041 — cut rails", since its own name means little
   // without the unit it is on.
   const stepLabel = (sched, st) => `${sched.unit} — ${st.name || 'unnamed step'}`
+
+  // A step's recorded reality is a pair of dates, the way a station's is: when
+  // the subassembly actually started and when it actually came off. `days` and
+  // `lag` beside them are the plan and are never touched from here.
+  //
+  // `actual_days` is kept in step with the pair rather than being a third
+  // opinion about the same thing -- whenever both dates are known they own the
+  // length, and the number is only what they come to.
+  const saveStepDates = useCallback((sched, st, which, date) => {
+    if (!stepDatesEnabled) return
+    const start = which === 'start' ? date : st.actualStart
+    const finish = which === 'finish' ? date : st.actualFinish
+    saveDrag('step', st.id, {
+      actual_start: start ? isoDate(start) : null,
+      actual_finish: finish ? isoDate(finish) : null,
+      actual_days: start && finish && finish >= start ? workdaysInclusive(start, finish, cal) : null,
+    }, `${stepLabel(sched, st)} — when it really ran`)
+  }, [stepDatesEnabled, cal, saveDrag])
 
   const addStep = useCallback(async (job, stage) => {
     const cur = (steps || []).filter((r) => r.job_id === job.id && r.stage === stage)
@@ -808,6 +858,11 @@ export default function App() {
         // lands and how long it really takes. Null means derived.
         actualStart: r.actual_start ? parseDate(r.actual_start) : null,
         actualDays: r.actual_days == null ? null : r.actual_days,
+        // The other end of it. `actualStart` is not past tense -- it says where
+        // a step lands, which may be next month -- so on its own it cannot
+        // place work that is already behind us. A finish is the day it was
+        // actually done, written when the step is ticked.
+        actualFinish: r.actual_finish ? parseDate(r.actual_finish) : null,
       })
       m.set(r.job_id, e)
     })
@@ -921,6 +976,38 @@ export default function App() {
     catch (err) { return { projected: [], projectError: String((err && err.message) || err) } }
   }, [units, caps, today, cal, stepsByJob])
   const projById = useMemo(() => new Map(projected.map((p) => [p.id, p])), [projected])
+
+  // Closed stations by unit, then by station.
+  const logByJob = useMemo(() => {
+    const m = new Map()
+    ;(stageLog || []).forEach((l) => {
+      const e = m.get(l.job_id) || {}
+      e[l.stage] = {
+        plannedDays: l.planned_days,
+        actualDays: l.actual_days,
+        started: l.started_on ? parseDate(l.started_on) : null,
+        // Rows closed before the dates were kept only know the day they were
+        // written, which for those is the nearest thing to a finish date.
+        finished: l.finished_on ? parseDate(l.finished_on)
+          : l.closed_on ? parseDate(l.closed_on) : null,
+      }
+      m.set(l.job_id, e)
+    })
+    return m
+  }, [stageLog])
+
+  // What the projection lane draws, as against what it schedules. `projected`
+  // carries work still to do; this carries the whole life of each station, so a
+  // bar can show where the work started as well as where it is going. Kept
+  // apart deliberately -- see lifeSpans in the engine for why widening `spans`
+  // itself would have changed six other things that read it.
+  const lifeById = useMemo(() => {
+    const m = new Map()
+    units.forEach((j) => {
+      m.set(j.id, lifeSpans(j, projById.get(j.id), logByJob.get(j.id), today, cal))
+    })
+    return m
+  }, [units, projById, logByJob, today, cal])
 
   // The other half of the plan watch armed in saveJob and saveStep: the edit
   // has landed, so compare the station spans against the snapshot. The earliest
@@ -1039,8 +1126,21 @@ export default function App() {
     // nobody has written yet reads undefined -- which is dropped from the
     // request rather than sent as null, so the first undo on a step would have
     // done nothing at all.
+    // All three keys every time, even when only one of them moved. The undo
+    // entry is built from the keys of the patch and read off the stored row,
+    // and a column nobody has written yet reads undefined -- which is dropped
+    // from the request rather than sent as null, so the first undo on a step
+    // would have done nothing at all. `actual_finish` has to be in here too:
+    // it owns the step's end, so a drag that left it behind would move the bar
+    // and have it snap straight back to the recorded finish.
     const record = (patch, what) => saveDrag('step', stepId,
-      { actual_start: null, actual_days: null, ...patch }, `${stepLabel(sched, step)} — ${what}`)
+      { actual_start: null, actual_days: null, actual_finish: null, ...patch },
+      `${stepLabel(sched, step)} — ${what}`)
+    // What a pair of dates comes to, so the length never disagrees with them.
+    const pair = (from, to) => ({
+      actual_start: isoDate(from), actual_finish: isoDate(to),
+      actual_days: workdaysInclusive(from, to, cal),
+    })
     // The day the pointer landed on, rounded onto a working day the way it was
     // dragged. A step cannot start on a day the shop is shut.
 
@@ -1048,7 +1148,7 @@ export default function App() {
       const end = onWorkday(cal, addDays(span.end, deltaDays), deltaDays)
       const days = Math.max(1,
         workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
-      if (onProj) { if (days !== span.days) record({ actual_days: days }, 'days it takes') }
+      if (onProj) { if (days !== span.days) record(pair(strip(span.start), end < span.start ? strip(span.start) : end), 'when it finished') }
       else if (days !== step.days) saveDrag('step', stepId, { days }, stepLabel(sched, step))
       return
     }
@@ -1060,14 +1160,14 @@ export default function App() {
       // station's remaining work does is the whole point of it.
       const at = onWorkday(cal, addDays(span.start, deltaDays), deltaDays)
       if (mode === 'start') {
-        const from = at > span.end ? strip(span.end) : at
-        record({ actual_start: isoDate(from), actual_days: Math.max(1, workdaysInclusive(from, span.end, cal)) },
-          'when it runs and how long')
+        // The left edge moves the start and holds the finish.
+        record(pair(at > span.end ? strip(span.end) : at, strip(span.end)), 'when it started')
         return
       }
+      // The middle takes the whole piece with it, both ends together, so its
+      // length survives the move.
       if (isoDate(at) !== (step.actualStart ? isoDate(step.actualStart) : null)) {
-        record({ actual_start: isoDate(at), ...(step.actualDays == null ? {} : { actual_days: step.actualDays }) },
-          'when it runs')
+        record(pair(at, shiftWorkdays(cal, at, Math.max(1, span.days) - 1)), 'when it runs')
       }
       return
     }
@@ -1114,66 +1214,85 @@ export default function App() {
   // bar always lands where it was dropped and the plan never hears about it.
   const dragProjected = useCallback((jobId, key, mode, deltaDays) => {
     const job = units.find((j) => j.id === jobId)
-    const proj = projById.get(jobId)
-    const span = proj && proj.spans[key]
-    if (!job || !span || !stationActualsEnabled) return
-    const running = (job.stage || 'none') === key
+    const life = lifeById.get(jobId)
+    // Measured against the bar that is actually drawn -- its whole life, not
+    // the remaining work underneath it. A running station's bar starts the day
+    // the shop started it, so the day count an edge produces is the station's
+    // whole run, which is exactly what days_left stores. Measuring from the
+    // remaining-work span instead would count the days already spent twice.
+    const s = life && life[key]
+    if (!job || !s || !stationActualsEnabled) return
     // Its steps place it; anything written here would be overruled by them.
     const built = (stepsByJob.get(jobId) || {})[key]
     if (built && built.length) return
     const label = `${job.unit} — ${STAGE_LABEL[key].toLowerCase()} on the floor`
+    const moved = (d) => onWorkday(cal, addDays(d, deltaDays), deltaDays)
 
+    // Closed. The projection has nothing left to say about it, so a drag
+    // corrects the two dates the stage log keeps and nothing else.
+    if (s.state === 'closed') {
+      if (!stageDatesEnabled) return
+      const patch = {}
+      if (mode !== 'end') {
+        const a = moved(s.start)
+        patch.start = mode === 'start' && a > s.end ? strip(s.end) : a
+      }
+      if (mode !== 'start') {
+        const b = moved(s.end)
+        patch.finish = mode === 'end' && b < s.start ? strip(s.start) : b
+      }
+      saveStageDates(job, key, patch)
+      return
+    }
+
+    // Under way. The left edge says when it started and the right says when it
+    // finishes; days_left is the run between them, counted from the start
+    // rather than from today, so the finish stays where it was dropped instead
+    // of walking a day forward every day nobody retypes it.
+    if (s.state === 'running') {
+      if (mode === 'end') {
+        const end = moved(s.end)
+        const days = workdaysInclusive(s.start, end < s.start ? s.start : end, cal)
+        if (days !== stationRun(job)) {
+          saveDrag('job', jobId, { daysLeft: days },
+            `${job.unit} — ${STAGE_LABEL[key].toLowerCase()} run length`)
+        }
+        return
+      }
+      const start = moved(s.start)
+      const patch = { stageStarted: start }
+      // The left edge holds the finish, so it resizes too. The middle takes the
+      // whole station with it and keeps its length.
+      if (mode === 'start') {
+        patch.daysLeft = workdaysInclusive(start > s.end ? strip(s.end) : start, s.end, cal)
+      }
+      saveDrag('job', jobId, patch, label)
+      return
+    }
+
+    // Still ahead of the unit: none of it has happened, so the bar is wholly
+    // forecast and a drag says where the shop expects to put it.
     if (mode === 'move' || mode === 'start') {
-      const start = onWorkday(cal, addDays(span.start, deltaDays), deltaDays)
+      const start = moved(s.start)
       const patch = { actuals: { ...job.actuals, [key]: start } }
       if (mode === 'start') {
-        // The left edge moves the start and holds the finish, so it resizes too.
-        const days = Math.max(1,
-          workdaysInclusive(start > span.end ? strip(span.end) : start, span.end, cal))
-        if (running) patch.daysLeft = runFromDaysToGo(job, today, days, cal)
-        else patch.actualDays = { ...job.actualDays, [key]: days }
+        patch.actualDays = { ...job.actualDays,
+          [key]: Math.max(1, workdaysInclusive(start > s.end ? strip(s.end) : start, s.end, cal)) }
       }
       saveDrag('job', jobId, patch, label)
       return
     }
     if (mode !== 'end') return
-    const end = onWorkday(cal, addDays(span.end, deltaDays), deltaDays)
-    const days = Math.max(running ? 0 : 1,
-      workdaysInclusive(span.start, end < span.start ? span.start : end, cal))
-    if (running) {
-      // What is left on the station the unit is standing in. Stored as the run
-      // length from the day it started, so the finish stays where it is dropped
-      // instead of walking a day forward every day nobody retypes it.
-      if (days !== daysToGo(job, today, cal)) {
-        saveDrag('job', jobId, { daysLeft: runFromDaysToGo(job, today, days, cal) },
-          `${job.unit} — days left in ${STAGE_LABEL[key].toLowerCase()}`)
-      }
-      return
-    }
+    const end = moved(s.end)
+    const days = Math.max(1, workdaysInclusive(s.start, end < s.start ? s.start : end, cal))
     if (days !== (job.actualDays && job.actualDays[key] != null ? job.actualDays[key] : job[key])) {
       saveDrag('job', jobId, { actualDays: { ...job.actualDays, [key]: days } }, label)
     }
-  }, [units, projById, stepsByJob, cal, today, stationActualsEnabled, saveDrag])
+  }, [units, lifeById, stepsByJob, cal, stationActualsEnabled, stageDatesEnabled,
+    saveStageDates, saveDrag])
   const partsById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
 
   // Closed stations by unit, then by station.
-  const logByJob = useMemo(() => {
-    const m = new Map()
-    ;(stageLog || []).forEach((l) => {
-      const e = m.get(l.job_id) || {}
-      e[l.stage] = {
-        plannedDays: l.planned_days,
-        actualDays: l.actual_days,
-        started: l.started_on ? parseDate(l.started_on) : null,
-        // Rows closed before the dates were kept only know the day they were
-        // written, which for those is the nearest thing to a finish date.
-        finished: l.finished_on ? parseDate(l.finished_on)
-          : l.closed_on ? parseDate(l.closed_on) : null,
-      }
-      m.set(l.job_id, e)
-    })
-    return m
-  }, [stageLog])
 
   // The four dates per station, per unit: planned start and finish against
   // actual start and finish.
@@ -1219,12 +1338,28 @@ export default function App() {
     // rather than laid out properly: this runs on every schedule change, and
     // the padding below absorbs the slack.
     steps.forEach((r) => {
+      if (r.actual_finish) {
+        const f = parseDate(r.actual_finish)
+        if (f < min) min = f
+        if (f > max) max = f
+      }
       if (!r.actual_start) return
       const a = parseDate(r.actual_start)
       if (a < min) min = a
       const e = addDays(a, Math.max(1, r.actual_days == null ? r.days : r.actual_days) * 2)
       if (e > max) max = e
     })
+    // The projection lane reaches back as far as the day each station really
+    // started, which the plan above it knows nothing about: a station that ran
+    // a month before it was booked to, or a unit put on the board part-way
+    // through. Its bar is drawn at a negative offset otherwise, which puts it
+    // under the sticky unit label with no way to scroll to it.
+    lifeById.forEach((life) => OPS.forEach((o) => {
+      const s = life[o.key]
+      if (!s) return
+      if (s.start < min) min = s.start
+      if (s.end > max) max = s.end
+    }))
     min = addDays(min, -3)
     max = addDays(max, 4)
     const days = []
@@ -1237,7 +1372,7 @@ export default function App() {
       else months.push({ label, count: 1 })
     })
     return { days, months }
-  }, [scheduled, projected, steps, today])
+  }, [scheduled, projected, steps, lifeById, today])
 
   // The table is for working through the book, so order it by the date being
   // entered rather than by the computed start the board sorts on. The order is
@@ -1590,12 +1725,16 @@ export default function App() {
     placed.current = true
     let at = null
     try { at = JSON.parse(window.localStorage.getItem('boardAt')) } catch { /* private window */ }
-    if (!at || !at.d) return
-    const i = Math.max(0, Math.min(days.length - 1, daysBetween(days[0], parseDate(at.d))))
+    // Nothing stored -- a first visit, or a browser that keeps nothing. The
+    // window reaches back as far as the oldest station the shop has a record
+    // of, so its left edge can be weeks of finished work; today is where the
+    // answer is, with a few days of lead-in behind it.
+    const target = at && at.d ? parseDate(at.d) : addDays(today, -3)
+    const i = Math.max(0, Math.min(days.length - 1, daysBetween(days[0], target)))
     el.scrollLeft = i * COL
-    el.scrollTop = at.top || 0
+    el.scrollTop = (at && at.top) || 0
     if (gripRef.current) gripRef.current.style.transform = `translateX(${el.scrollLeft}px)`
-  }, [view, days])
+  }, [view, days, today])
 
   const loads = useMemo(() => {
     const out = {}
@@ -1673,7 +1812,8 @@ export default function App() {
   // more than once.
   const boardRow = (j) => (
     <Row key={j.id} j={j} days={days} dayIndex={dayIndex} todayT={todayT} cal={cal}
-      pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} tracking={trackingEnabled}
+      pn={partsById.get(j.partId)?.part_number} proj={projById.get(j.id)} life={lifeById.get(j.id)}
+      tracking={trackingEnabled} logDates={stageDatesEnabled}
       onDragStage={pinsEnabled ? dragStage : undefined}
       steps={stepsByJob.get(j.id)} open={openUnits.has(j.id)}
       onDragStep={stepsEnabled ? dragStep : undefined}
@@ -1852,6 +1992,7 @@ export default function App() {
             return n
           })}
           onSaveStep={saveStep} onToggleNeed={toggleNeed}
+          stepDates={stepDatesEnabled} onSaveStepDates={saveStepDates}
           showDone={showDone} onToggleDone={toggleDone}
           columnOrder={columnOrder} onMoveColumns={moveColumns}
           columnWidths={columnWidths} onResizeColumns={resizeColumns} />
@@ -1945,23 +2086,47 @@ export default function App() {
                             <span className="stepat" title="Working day of the station this step starts on">
                               day {off + 1}
                             </span>
-                            {/* What the shop has recorded against this step, as
-                                against the planned day beside it. The only
-                                place it can still be read once the station
-                                closes and its projected block goes away. */}
-                            {stepActualsEnabled && (st.actualStart || st.actualDays != null) && (
-                              <span className="steptag" title="Recorded on the board, not worked out from the plan">
-                                {st.actualStart ? fmt(st.actualStart) : 'length'}
-                                {st.actualDays != null ? ` · ${st.actualDays} d` : ''}
-                                <button type="button" title="Clear it and let the board work it out again"
-                                  onClick={() => saveDrag('step', st.id,
-                                    { actual_start: null, actual_days: null },
-                                    `${sel.unit} — ${st.name || 'unnamed step'} — recorded dates`)}>×</button>
+                            {stepActualsEnabled && st.actualDays != null
+                              && !(st.actualStart && st.actualFinish) && (
+                              <span className="steptag" title="A length recorded without dates">
+                                {st.actualDays} d
                               </span>
                             )}
                             <button className="stepdel" title="Remove this step"
                               onClick={() => removeStep(st.id)}>×</button>
                           </div>
+                          {/* When the subassembly really ran. Breaking a station
+                              down is a request for more detail about this one
+                              unit, so the detail has to be enterable and not
+                              only draggable: a foreman reading a date off a
+                              traveller should be able to type it. Empty means
+                              derived, exactly as it does on a station. */}
+                          {trackingEnabled && stepDatesEnabled && (
+                            <div className="stepdates">
+                              <span className="nlab">ran</span>
+                              <input type="date" className="dateedit" value={st.actualStart ? isoDate(st.actualStart) : ''}
+                                max={st.actualFinish ? isoDate(st.actualFinish) : undefined}
+                                title={`When ${st.name || 'this step'} actually started`}
+                                onChange={(e) => saveStepDates(sel, st, 'start',
+                                  e.target.value ? parseDate(e.target.value) : null)} />
+                              <span className="nlab">to</span>
+                              <input type="date" className="dateedit" value={st.actualFinish ? isoDate(st.actualFinish) : ''}
+                                min={st.actualStart ? isoDate(st.actualStart) : undefined}
+                                title={`When ${st.name || 'this step'} actually came off`}
+                                onChange={(e) => saveStepDates(sel, st, 'finish',
+                                  e.target.value ? parseDate(e.target.value) : null)} />
+                              {(st.actualStart || st.actualFinish || st.actualDays != null) && (
+                                <button type="button" className="clr"
+                                  title="Clear them and let the board work this step out again"
+                                  onClick={() => saveDrag('step', st.id,
+                                    { actual_start: null, actual_days: null, actual_finish: null },
+                                    `${stepLabel(sel, st)} — when it really ran`)}>clear</button>
+                              )}
+                              {st.actualStart && st.actualFinish && (
+                                <span className="ran">{st.actualDays} d</span>
+                              )}
+                            </div>
+                          )}
                           {list.length > 1 && (
                             <div className="stepneeds">
                               <span className="nlab">waits for</span>
@@ -2204,7 +2369,8 @@ function SignIn() {
 
 function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApplyPart, onResort, projById, tracking,
   onAdvance, today, sort, onSort, cal, stepsByJob, openUnits, onToggleOpen, onSaveStep, onToggleNeed,
-  showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns }) {
+  showDone, onToggleDone, columnOrder, onMoveColumns, columnWidths, onResizeColumns,
+  stepDates, onSaveStepDates }) {
   // The standard this unit's model builds to, for saying where the unit has
   // drifted off it. A unit with no part number has no standard to drift from.
   const partById = useMemo(() => new Map(parts.map((p) => [p.id, p])), [parts])
@@ -2574,6 +2740,22 @@ function OrdersTable({ rows, parts, partsEnabled, priorityEnabled, onSave, onApp
                   <span className="dlabel">d</span>
                 </span>
                 <span className="tdates">{fmt(x.start)} – {fmt(x.end)}</span>
+                {tracking && stepDates && (
+                  <span className="stepdates inline">
+                    <span className="nlab">ran</span>
+                    <input type="date" className="dateedit" value={x.actualStart ? isoDate(x.actualStart) : ''}
+                      max={x.actualFinish ? isoDate(x.actualFinish) : undefined}
+                      title={`When ${x.name || 'this step'} actually started`}
+                      onChange={(e) => onSaveStepDates(j, x, 'start',
+                        e.target.value ? parseDate(e.target.value) : null)} />
+                    <span className="nlab">to</span>
+                    <input type="date" className="dateedit" value={x.actualFinish ? isoDate(x.actualFinish) : ''}
+                      min={x.actualStart ? isoDate(x.actualStart) : undefined}
+                      title={`When ${x.name || 'this step'} actually came off`}
+                      onChange={(e) => onSaveStepDates(j, x, 'finish',
+                        e.target.value ? parseDate(e.target.value) : null)} />
+                  </span>
+                )}
                 {list.length > 1 && (
                   <span className="stepneeds inline">
                     <span className="nlab">waits for</span>
@@ -3288,8 +3470,8 @@ function StageReport({ log, jobs, partsById, stages, datesEnabled }) {
   )
 }
 
-function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onSelect, onDragStage,
-  steps, open, onToggleOpen, onDragStep, onDragProjected }) {
+function Row({ j, days, dayIndex, todayT, cal, pn, proj, life, tracking, logDates, selected, onSelect,
+  onDragStage, steps, open, onToggleOpen, onDragStep, onDragProjected }) {
   const hasSteps = steps && OPS.some((o) => steps[o.key].length)
   // Parallel steps overlap in time, so each station's steps are spread over as
   // many lines as it takes for none of them to sit on top of another, and the
@@ -3329,6 +3511,9 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // from, so the row divides into a plan half and a projection half. With the
   // unit collapsed this puts the projection back at 24px, exactly where it sits
   // on a row with no steps at all.
+  // The last day that has actually happened. The hatching on both lanes stops
+  // here, so the date line falls on the seam rather than a column either side.
+  const lastDone = cal.prevWorkday(new Date(todayT))
   const STEP_LANE = 18
   const planStepsTop = 23
   const projTop = planLanes ? planStepsTop + planLanes * STEP_LANE + 2 : 24
@@ -3375,15 +3560,34 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
   // back where it came from.
   const [drag, setDrag] = useState(null)
   const dragRef = useRef(null)
-  const snap = drag ? Math.round(drag.dx / COL) * COL : 0
-  // Where a bar being moved will actually land, worked out the same way the
-  // release works it out, so the preview cannot promise a day the release will
-  // not give. Drag onto a Saturday and the bar visibly stays put rather than
-  // sliding there and springing back to Friday -- or, as it used to, leaping
-  // over the weekend to Monday for a one-column drag.
+  // How many columns the gesture has bought, and the only place that is worked
+  // out -- the preview and the release both read it, so the preview cannot
+  // promise a day the release will not give.
+  //
+  // An edge is measured against the column the pointer is *in*, not against how
+  // far it has travelled. A bar is drawn `left: x + 1, width: w - 3`, so its
+  // right edge sits two pixels inside the right boundary of its finish day and
+  // the grip is the last seven pixels of that: the pointer goes down two-thirds
+  // of the way across the column it grabbed. Rounding the distance travelled
+  // then carried that offset into wherever it was dropped, so releasing on the
+  // left of a column gave the day before it -- the finish landed a day early
+  // unless the drop happened to fall past the middle. Counting columns from the
+  // grabbed column's own left boundary gives the day under the pointer wherever
+  // in the column it is let go.
+  //
+  // A bar grabbed by its middle has no edge to line up, so it keeps moving by
+  // the columns the pointer moved.
+  const cols = (d) => (!d ? 0
+    : d.mode === 'move' ? Math.round(d.dx / COL)
+    : Math.floor((d.x0 + d.dx - d.edge0) / COL))
+  const snap = cols(drag) * COL
+  // Where a bar being moved will actually land. Drag onto a Saturday and the
+  // bar visibly stays put rather than sliding there and springing back to
+  // Friday -- or, as it used to, leaping over the weekend to Monday for a
+  // one-column drag.
   const previewX = (from) => {
-    const cols = Math.round(snap / COL)
-    return dayIndex(onWorkday(cal, addDays(from, cols), cols)) * COL
+    const n = cols(drag)
+    return dayIndex(onWorkday(cal, addDays(from, n), n)) * COL
   }
 
   // One gesture, four kinds of bar -- the two station lanes and the two blocks
@@ -3397,7 +3601,14 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
     e.preventDefault()
     e.stopPropagation()
     e.currentTarget.setPointerCapture(e.pointerId)
-    const d = { lane, key, stepId, mode, x0: e.clientX, dx: 0 }
+    // The left boundary, in client pixels, of the column the grabbed edge sits
+    // in -- the fixed reference the column count is measured from. Taken from
+    // the bar rather than the grip, and taken now, before the preview starts
+    // moving it. The bar's drawn edges sit one pixel inside their column on the
+    // left and two on the right, which is what the offsets undo.
+    const r = e.currentTarget.getBoundingClientRect()
+    const edge0 = mode === 'end' ? r.right + 2 - COL : r.left - 1
+    const d = { lane, key, stepId, mode, x0: e.clientX, dx: 0, edge0 }
     dragRef.current = d
     setDrag(d)
   }
@@ -3419,7 +3630,7 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
     dragRef.current = null
     setDrag(null)
     if (!d) return
-    const n = Math.round(d.dx / COL)
+    const n = cols(d)
     if (n === 0) return
     if (d.lane === 'splan' || d.lane === 'sproj') onDragStep(j.id, d.key, d.stepId, d.mode, n, d.lane)
     else if (d.lane === 'proj') onDragProjected(j.id, d.key, d.mode, n)
@@ -3500,10 +3711,16 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             late. A unit that will make its date has a projection too, and it is
             the one worth seeing: it says which week the work is expected to
             start, and a row with nothing in this lane reads as a row with no
-            answer rather than as good news. Only a finished unit has no bars
-            here, because it has no work left to land. */}
-        {tracking && proj && OPS.map((o) => {
-          const s = proj.spans[o.key]
+            answer rather than as good news.
+            Each bar spans the whole life of its station -- the day the work
+            really started through to where it is really going -- so the date
+            line falls inside it rather than chasing it off the board. The part
+            that has happened is hatched and the part still to come is left
+            plain, which is the whole point of the lane: both halves of the
+            station on one bar. A finished unit keeps a full row of history
+            instead of an empty lane. */}
+        {tracking && life && OPS.map((o) => {
+          const s = life[o.key]
           if (!s) return null
           let x = dayIndex(s.start) * COL, w = (dayIndex(s.end) - dayIndex(s.start) + 1) * COL
           const liveProj = drag && drag.lane === 'proj' && drag.key === o.key
@@ -3514,7 +3731,8 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           }
           // The station the unit is standing in is running: its work is
           // happening now, so it can be shortened or lengthened but not moved.
-          const running = (j.stage || 'none') === o.key
+          const running = s.state === 'running'
+          const closed = s.state === 'closed'
           const built = Boolean(steps && steps[o.key].length)
           // Broken into steps, so the steps place it and set its length and the
           // bar is only their outline -- dragging it did nothing you could see,
@@ -3522,12 +3740,20 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
           // to. Worse when the steps carried recorded dates of their own: the
           // bar previewed under the pointer and snapped straight back. Move the
           // steps instead.
-          const handle = onDragProjected && !built
+          // A closed station is history, and correcting history needs the two
+          // dates the stage log keeps, which only exist on a migrated database.
+          const handle = onDragProjected && !built && (!closed || logDates)
           // The floor has said where this one goes, rather than the projection
           // working it out. Marked the way a stage placed by hand is marked,
           // because it is the same kind of statement.
           const recorded = Boolean((j.actuals && j.actuals[o.key])
             || (j.actualDays && j.actualDays[o.key] != null))
+          // How much of the bar has already happened. Measured off the drawn
+          // left edge rather than off today, so a drag preview carries the
+          // hatching with it instead of leaving it behind on the grid.
+          const wasW = s.actualEnd
+            ? Math.max(0, Math.min(w - 3, (dayIndex(s.actualEnd) - dayIndex(s.start) + 1) * COL - 1))
+            : 0
           return (
             <div key={`p-${o.key}`}
               className={`bar proj${ringReason[o.key] ? ' behind' : ''}${recorded ? ' actual' : ''}`
@@ -3536,18 +3762,27 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
               onPointerMove={handle ? move : undefined}
               onPointerUp={handle ? up : undefined}
               onPointerCancel={handle ? up : undefined}
-              title={`Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`
+              title={(closed ? `${o.label}: ran ${fmt(s.start)} – ${fmt(s.end)}`
+                : running ? `${o.label}: started ${fmt(s.start)}, projected to finish ${fmt(s.end)}`
+                  : `Projected ${o.label.toLowerCase()}: ${fmt(s.start)} – ${fmt(s.end)}`)
                 + (ringReason[o.key] ? ` — ${ringReason[o.key]}` : '')
                 + (recorded ? ' — recorded by the shop, not worked out' : '')
                 + (!onDragProjected ? ''
                   : built ? '. Broken into steps — drag those to say when the work really runs;'
                     + ' this bar is whatever they cover'
-                  : running ? '. Drag to say when the rest of it runs, or the right edge for the days left.'
+                  : !handle ? ''
+                  : closed ? '. Drag an edge to correct when it really ran.'
+                    + ' The planned bar above does not move'
+                  : running ? '. Drag the left edge for when it started, the right for when it finishes.'
                     + ' The planned bar above does not move'
                   : '. Drag to say when it really runs, or an edge for how long it really takes.'
                     + ' The planned bar above does not move')}
               style={{ left: x + 1, width: w - 3, top: projTop,
                 background: o.light, borderColor: o.color, color: o.color }}>
+              {/* what has already happened, against what is still forecast.
+                  Hatched rather than filled: a solid fill is the planned lane's
+                  and two solid bars stacked read as one thick one. */}
+              {wasW > 0 && <i className="was" style={{ width: wasW }} />}
               {handle && <><span className="grip l" /><span className="grip r" /></>}
             </div>
           )
@@ -3593,6 +3828,17 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
             // one scale down: this is not where the board worked it out, it is
             // where it actually is.
             const recorded = kind === 'sproj' && (st.fixed || st.actualDays != null)
+            // How much of the step has actually happened, the same question the
+            // station bar above it answers. Only the projected lane asks it:
+            // the plan lane is what was promised and none of it is history.
+            // A recorded date can sit in the future -- `actual_start` is not
+            // past tense -- so a piece booked for next month stays plain until
+            // the day comes round.
+            const wasEnd = kind === 'sproj' && st.fixed && st.start <= lastDone
+              ? (st.end < lastDone ? st.end : lastDone) : null
+            const wasW = wasEnd
+              ? Math.max(0, Math.min(w - 3, (dayIndex(wasEnd) - dayIndex(st.start) + 1) * COL - 1))
+              : 0
             return (
               <div key={`${kind}-${st.id}`}
                 className={`bar step ${kind}${st.done ? ' done' : ''}${drags ? ' draggable' : ''}`
@@ -3621,8 +3867,9 @@ function Row({ j, days, dayIndex, todayT, cal, pn, proj, tracking, selected, onS
                   ...(plan
                     ? { background: op.color, borderColor: op.light, color: '#FFF' }
                     : { background: op.light, borderColor: op.color, color: op.color }) }}>
+                {wasW > 0 && <i className="was" style={{ width: wasW }} />}
                 {drags && <><span className="grip l" /><span className="grip r" /></>}
-                <span>{st.name || '—'}</span>
+                <span className="nm">{st.name || '—'}</span>
               </div>
             )
           })))}
@@ -3746,16 +3993,27 @@ function Style() {
     /* the step lines under each unit; the lane sets each one's top in the markup */
     .bar.step { height: 15px; border: 1px solid; border-radius: 2px; overflow: hidden;
       display: flex; align-items: center; padding: 0 4px; }
-    .bar.step span { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .bar.step.done { opacity: .55; }
-    .bar.step.done span { text-decoration: line-through; }
+    /* The label, and only the label. A rule written for the step's span also
+       reaches its two grip spans, and giving those position: relative took them
+       out of the corners and dropped them side by side in the middle of the bar
+       -- a step could then not be resized at all, because grabbing an edge hit
+       the body and moved it instead. (The CSS lives in a template literal, so
+       there are no backticks in these comments.) */
+    .bar.step span.nm { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; position: relative; z-index: 1; }
+    /* A done step recedes in the plan lane, where it is no longer the forecast.
+       In the projection it is history and history is the thing being read, so
+       the hatching says it at full strength instead -- the same way a closed
+       station's bar does. The struck-through label still says done in both. */
+    .bar.step.splan.done { opacity: .55; }
+    .bar.step.done span.nm { text-decoration: line-through; }
     .bar.step.draggable { cursor: grab; touch-action: none; }
     /* Placed by hand rather than worked out -- the same heavier border and dot
        a stage pinned by hand carries, because it says the same thing. */
     .bar.step.actual { border-width: 2px; }
     .bar.step.actual::before { content: ''; position: absolute; left: 2px; top: 50%; margin-top: -2px;
       width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-    .bar.step.actual span { margin-left: 6px; }
+    .bar.step.actual span.nm { margin-left: 6px; }
     .bar.step.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
     .bar.step .grip { top: -1px; bottom: -1px; }
     /* the only thing that says a unit has steps, so it has to be findable:
@@ -3775,13 +4033,21 @@ function Style() {
     /* two lanes: the plan on top, where the work actually lands beneath it */
     .bar { position: absolute; top: 12px; height: 20px; border-radius: 3px; }
     .bar.plan { top: 7px; height: 13px; border: 1px solid; }
-    .bar.proj { top: 24px; height: 13px; border: 1px solid; }
+    .bar.proj { top: 24px; height: 13px; border: 1px solid; overflow: hidden; }
+    /* The half of the bar that has already happened. Hatched rather than
+       filled, because a solid fill is what the planned lane means and two solid
+       bars stacked read as one thick one rather than as a plan and its outcome.
+       currentColor is the station's own colour, so this costs no new palette
+       and a late bar's red ring still reads over it. */
+    .bar .was { position: absolute; left: 0; top: 0; bottom: 0; opacity: .5;
+      background: repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 5px); }
     .bar.proj.draggable { cursor: grab; touch-action: none; }
     /* Recorded by the shop rather than worked out -- the heavier border and dot
        a stage placed by hand carries, because it says the same kind of thing. */
     .bar.proj.actual { border-width: 2px; }
     .bar.proj.actual::after { content: ''; position: absolute; left: 3px; top: 50%; margin-top: -2px;
-      width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+      width: 4px; height: 4px; border-radius: 50%; background: currentColor; z-index: 1; }
+    .bar.proj .grip { z-index: 1; }
     .bar.proj.dragging { cursor: grabbing; z-index: 4; box-shadow: 0 1px 6px rgba(0,0,0,.28); }
     .bar.proj.draggable:hover .grip { background: currentColor; opacity: .45; border-radius: 2px; }
     /* This station is behind: its planned dates have gone by with the work not
@@ -3964,6 +4230,19 @@ function Style() {
     .steprow { display: flex; align-items: center; gap: 7px; padding: 2px 0 2px 4px; }
     .stepat { font-size: 10px; color: #7A848C; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 40px; }
     .stepneeds { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px 0 1px 29px; }
+    /* when the subassembly really ran, on a line of its own: the row above is
+       already the name, the length and the day of the station it starts on */
+    .stepdates { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 2px 0 1px 29px; }
+    /* .dateedit fills its cell in the stage table; here it is one field among
+       several on a line, so it takes only the width a date needs */
+    .stepdates .dateedit { width: auto; min-width: 0; flex: none; font-size: 11px; padding: 2px 4px; }
+    .stepdates .nlab { font-size: 10px; color: #9AA4AB; }
+    .stepdates .ran { font-size: 10px; font-weight: 700; color: #44688F; background: #E3EAF2;
+      border-radius: 3px; padding: 1px 5px; }
+    .stepdates .clr { border: 0; background: none; cursor: pointer; font-family: inherit;
+      font-size: 10px; color: #7A848C; text-decoration: underline; padding: 0 2px; }
+    .stepdates .clr:hover { color: #B3382E; }
+    .stepdates.inline { padding: 0; flex: none; }
     .stepneeds .nlab, .stepneeds em { font-size: 10px; color: #9AA4AB; font-style: normal; }
     .needchip { font-family: inherit; font-size: 10px; max-width: 132px; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; border: 1px solid #C6CDD1; background: #FFF;

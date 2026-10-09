@@ -15,7 +15,7 @@ Finite-capacity production scheduling for a three-stage shop (fabrication → pa
 2. Open the SQL editor, paste the contents of `supabase/schema.sql`, run it once.
 3. From Project Settings → API, copy the **Project URL** and **anon public key**.
 
-If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without `actual_start` and `actual_days` on `job_steps`, or the matching `*_actual_start` and `*_actual_days` on `jobs`, the board draws both lanes as before and the projected bars simply don't drag; it says which columns are missing. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
+If you set this up before the shop calendar, the part-number catalog, production tracking, pinned stages, step lists or work-order priority existed, run just the `day_overrides`, `part_numbers`, `stage_log` and `alter table public.jobs` blocks from `supabase/schema.sql` against your database — the rest is already there. Without the `*_pinned_start` columns the board still schedules; it just can't be overruled by dragging, and the legend says so. Without the `priority` column the board schedules the way it always did, by delivery date; the column and the badge simply don't appear. Without `actual_start` and `actual_days` on `job_steps`, or the matching `*_actual_start` and `*_actual_days` on `jobs`, the board draws both lanes as before and the projected bars simply don't drag; it says which columns are missing. Without `actual_finish` on `job_steps` a step still ticks off, it just records no dates, so a closed station draws its bar with no steps under it. Without `started_on`/`finished_on` on `stage_log` a closed station's bar is counted back from the days it took, and where even that is missing it draws no bar. Without those tables the board still works; it shows a note where the day toggles and the catalog button would be.
 
 The same goes for the `alter table public.stage_log` block that adds `started_on` and `finished_on` and drops the `not null` on `actual_days`: without it, closing a station still records the days it took, but the stage-date columns stay empty and they can't be corrected by hand.
 
@@ -230,13 +230,38 @@ is drawn outlined: where each piece of work is actually expected to land, measur
 station's projected start. A row therefore splits into a plan half and a projection half, and the
 gap between a step in one and the same step in the other is how far that piece of work has moved.
 
+#### When each step really ran
+
+A step records the same pair of dates a station does — **when the subassembly actually started and
+when it actually came off**. Both are typed under the step in the unit panel and in the table
+(*ran … to …*), or dragged on the board. That is the point of breaking a work order down: the extra
+detail is only worth having if the real timing can be entered against it, one subassembly at a time.
+
+Ticking a step done is the shorthand for the common case. It stamps the finish as today and counts
+the start back off it from the length the step carries, so one tick records a whole span — and it
+never overwrites a date somebody has already entered by hand. Empty means derived, exactly as it
+does on a station: the step sits where its prerequisites and its lag put it.
+
+The two dates own the step's length whenever both are known; the day count beside them is only what
+they come to, never a second opinion about it. **Clear** forgets all of it and hands the step back
+to the plan.
+
+Step bars in the projection are **hatched over the part that has already happened**, exactly as the
+station bars above them are, and the hatching stops on the same date line. A step finished in the
+past is hatched end to end; one started and still running is hatched to the line and plain after it;
+one with nothing recorded, or recorded for a date still to come, is plain throughout — `actual_start`
+is not past tense, so a subassembly booked for next month stays plain until the day comes round. In
+the projection a done step is no longer faded, because there it *is* the history being read and the
+hatching already says so; in the plan lane above it still recedes, and its label is struck through
+in both.
+
 Three things follow from what the lower block is:
 
-- **A step already ticked off does not appear in the projection**, unless something has been
-  recorded against it. It is not work still to come, so it stays in the plan block above, struck
-  through and outlined, where it belongs to the record rather than to the forecast. For the station
-  in progress this is what makes the block read correctly: what is left of it runs from where the
-  projection puts it.
+- **A step already ticked off does not appear in the projection**, unless a date has been recorded
+  against it. It is not work still to come, so it stays in the plan block above, struck through and
+  outlined, where it belongs to the record rather than to the forecast. For the station in progress
+  this is what makes the block read correctly: what is left of it runs from where the projection
+  puts it.
 - **A station with nothing left to project has no lower block** — one the unit has already passed,
   a finished unit, or a running station with no days left. The plan block is still drawn.
 - **The station always covers its own steps**, including the one in progress. Its bar used to be as
@@ -473,7 +498,11 @@ Dragging changes the day fabrication has to start, which is what the board sorts
 leap around under the pointer. The board holds its order instead, settling when units are added or
 removed, or when **Re-sort rows** is clicked.
 
-On the board each row carries two lanes: the plan on top, filled solid in the station's colour, and where the remaining work actually lands underneath, the same colour outlined over a pale fill. The plan is stated flatly; what is actually coming is sketched beneath it. A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows. Every unit with work left shows both lanes, whether or not it is running late: a unit that will make its date still has a projection, and it is the one worth seeing, because it says which week the work is expected to start. Only a finished unit has nothing in the lower lane, having no work left to land.
+On the board each row carries two lanes: the plan on top, filled solid in the station's colour, and underneath it the same colour outlined over a pale fill — where the work really is. The plan is stated flatly; what the shop is actually doing is sketched beneath it. A pair therefore reads as one station in two states, which is what the **Plan over projection** key in the legend shows.
+
+**Each bar in the lower lane spans the whole life of its station** — from the day the work really started through to where it is really going — so the date line falls inside it rather than chasing it off the board. The part that has already happened is **hatched**; the part still forecast is left plain. One bar therefore carries both halves of the station, and the hatching stops exactly on the date line. A station that has closed is hatched end to end, a station still ahead of the unit is plain end to end, and the one under way is split. A finished unit keeps a full row of history rather than an empty lane.
+
+That is what makes an overrun visible: a closed fabrication bar that runs three days past the planned bar directly above it says so at a glance, and says why paint started late. The dates come from what was recorded — `stage_started` for the station under way, the stage log's start and finish for the ones behind it. A station with no record of when it ran draws no bar, because the board never invents a date it was not given.
 
 A **red ring** on a bar in the lower lane — the projection, where the remaining work actually lands — says that station is behind, for either of two reasons.
 
