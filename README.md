@@ -146,9 +146,9 @@ already finished** puts them back for anyone checking over them.
 Dates ringed in red are the ones the board rings the bar for. A ringed **planned start** or **Due** date has already gone by with the station still open; a ringed **Projected finish** is landing past the Due date beside it. The row tint marks the first of those only — a date that has already blown is the one there is something to do about today, while *Against plan* reads late on nearly everything while the shop is behind. The section headings count both, and a station the unit has already finished is never marked either way. These marks use the just-in-time plan, so unlike the board's they do not follow the **Level to capacity** toggle.
 
 Each section has its own **Download CSV**, and **Download all three** puts every station in one
-file with a Station column. The files carry the same columns as the tables — the part description
-among them, in the same place — plus the unit's own description in full, they are named for the station and the day they were taken
-(`paint-due-dates-2026-09-22.csv`), and they open straight into Excel. That is how the dates reach a
+file with a Station column. The files carry the same columns as the tables, part description
+included. They are named for the station and the day they were taken
+(`paint-due-dates-2026-09-22.csv`) and open straight into Excel. That is how the dates reach a
 foreman who has no login — printed for the wall, or mailed as an attachment.
 
 ### Breaking a station into steps

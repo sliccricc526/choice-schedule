@@ -3033,7 +3033,7 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
   const sections = useMemo(() => {
     // The part number is what is written on the traveller, so it leads; the
     // unit's own description stands in where there is no part number, and rides
-    // along as the tooltip and as its own column in the CSV either way.
+    // along as the tooltip either way.
     const model = (j) => {
       const p = j && j.partId ? partsById.get(j.partId) : null
       return (p && p.part_number) || (j && j.desc) || ''
@@ -3102,13 +3102,15 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
   }, [stages, byJob, partsById, cal, todayT, showClosed])
 
   const STATE = { closed: 'Finished', active: 'In the shop now', pending: 'Not started' }
-  // Part description sits beside Model in the file as it does on the page, and
-  // is named apart from Description, which is the unit's own and can differ.
-  const HEAD = ['Unit', 'Model', ...(showPdesc ? ['Part description'] : []), 'Description', 'Station',
+  // The file carries the page's columns, plus Station so the three sections can
+  // share one sheet. The unit's own description is not among them: with a part
+  // number it is a copy of the part description beside it, and without one it is
+  // already what Model says, so as a column it only ever repeated something.
+  const HEAD = ['Unit', 'Model', ...(showPdesc ? ['Part description'] : []), 'Station',
     'Status', 'Planned start', 'Planned finish', 'Projected start', 'Projected finish',
     'Working days vs plan', 'Delivery']
   const out = (d) => (d ? fmtNum(d) : '')
-  const line = (op, r) => [r.unit, r.model, ...(showPdesc ? [r.pdesc] : []), r.desc, op.label,
+  const line = (op, r) => [r.unit, r.model, ...(showPdesc ? [r.pdesc] : []), op.label,
     STATE[r.state], out(r.plan && r.plan.start), out(r.due), out(r.start), out(r.finish),
     r.late == null ? '' : r.late, out(r.delivery)]
   const save = (secs, name) => downloadCsv(`${name}-due-dates-${isoDate(today)}.csv`,
