@@ -120,13 +120,13 @@ read as a broken one.
 The **Foremen** view is the same plan cut the way a station runs it: one section for fabrication,
 one for paint, one for final assembly, each listing the units that station still has to touch.
 
-Each row leads with the unit and its **Model** — the part number written on the traveller — and,
-beside it, the **Part description**, so a foreman reading `100811` does not have to know what that
-is. It is the description from the part-number catalog, not the unit's own: picking a part number
-copies its description onto the unit, but the two are never linked again, and the unit's can be
-edited away from its model. A unit with no part number has no catalog entry to describe and shows a
-dash. A long description wraps inside its column rather than widening the table, so the dates stay
-on screen. Without the `part_numbers` table the column is left out entirely.
+Each row leads with the unit, its **Model** — the part number written on the traveller, or a dash
+where it has none — and its **Description**, so a foreman reading `100811` does not have to know
+what that is. The description is the unit's own, as it was typed for this build, rather than the
+part-number catalog's: picking a part number copies the catalog description onto the unit, but the
+two are never linked again and the unit's is the one the shop keeps up. A long description wraps
+inside its column rather than widening the table, so the dates stay on screen. Without the
+`part_numbers` table the Model column is left out entirely, since it would be a dash on every row.
 
 Every row carries both dates, side by side. **Due** is the planned finish — the latest that station
 could be done and still make the delivery date, capacity aside — and it moves when a delivery date,
@@ -146,7 +146,7 @@ already finished** puts them back for anyone checking over them.
 Dates ringed in red are the ones the board rings the bar for. A ringed **planned start** or **Due** date has already gone by with the station still open; a ringed **Projected finish** is landing past the Due date beside it. The row tint marks the first of those only — a date that has already blown is the one there is something to do about today, while *Against plan* reads late on nearly everything while the shop is behind. The section headings count both, and a station the unit has already finished is never marked either way. These marks use the just-in-time plan, so unlike the board's they do not follow the **Level to capacity** toggle.
 
 Each section has its own **Download CSV**, and **Download all three** puts every station in one
-file with a Station column. The files carry the same columns as the tables, part description
+file with a Station column. The files carry the same columns as the tables, description
 included. They are named for the station and the day they were taken
 (`paint-due-dates-2026-09-22.csv`) and open straight into Excel. That is how the dates reach a
 foreman who has no login — printed for the wall, or mailed as an attachment.

@@ -3025,26 +3025,19 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
   const byJob = useMemo(() => new Map(jobs.map((j) => [j.id, j])), [jobs])
 
   const todayT = today.getTime()
-  // The part description is a column only where there is a catalog to read it
-  // from. part_numbers is optional, and a shop not using it should not get a
-  // column that is empty on every row.
-  const showPdesc = partsById.size > 0
+  // Model is a column only where there is a catalog to read it from.
+  // part_numbers is optional, and a shop not using it should not get a column
+  // that is a dash on every row.
+  const showModel = partsById.size > 0
 
   const sections = useMemo(() => {
-    // The part number is what is written on the traveller, so it leads; the
-    // unit's own description stands in where there is no part number, and rides
-    // along as the tooltip either way.
+    // The part number, which is what is written on the traveller, and nothing
+    // else. It used to fall back to the unit's description where there was no
+    // part number, but the description has its own column now, and the fallback
+    // made those rows say the same thing twice.
     const model = (j) => {
       const p = j && j.partId ? partsById.get(j.partId) : null
-      return (p && p.part_number) || (j && j.desc) || ''
-    }
-    // What that part number is, as the catalog has it. Not the unit's own
-    // description: picking a part number copies its description onto the unit
-    // and the two are never linked again, so the unit's can be edited away from
-    // its model. A unit with no part number has no catalog entry to describe.
-    const pdesc = (j) => {
-      const p = j && j.partId ? partsById.get(j.partId) : null
-      return (p && p.description) || ''
+      return (p && p.part_number) || ''
     }
     return OPS.map((op) => {
       const rows = (stages || [])
@@ -3064,7 +3057,8 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
           return {
             ...s,
             model: model(j),
-            pdesc: pdesc(j),
+            // The unit's own description, as the shop has it for this build --
+            // not the catalog's, which it starts as a copy of and can drift from.
             desc: (j && j.desc) || '',
             delivery: j ? j.delivery : null,
             due,
@@ -3103,14 +3097,12 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
 
   const STATE = { closed: 'Finished', active: 'In the shop now', pending: 'Not started' }
   // The file carries the page's columns, plus Station so the three sections can
-  // share one sheet. The unit's own description is not among them: with a part
-  // number it is a copy of the part description beside it, and without one it is
-  // already what Model says, so as a column it only ever repeated something.
-  const HEAD = ['Unit', 'Model', ...(showPdesc ? ['Part description'] : []), 'Station',
+  // share one sheet. Model is left out where the page leaves it out.
+  const HEAD = ['Unit', ...(showModel ? ['Model'] : []), 'Description', 'Station',
     'Status', 'Planned start', 'Planned finish', 'Projected start', 'Projected finish',
     'Working days vs plan', 'Delivery']
   const out = (d) => (d ? fmtNum(d) : '')
-  const line = (op, r) => [r.unit, r.model, ...(showPdesc ? [r.pdesc] : []), op.label,
+  const line = (op, r) => [r.unit, ...(showModel ? [r.model] : []), r.desc, op.label,
     STATE[r.state], out(r.plan && r.plan.start), out(r.due), out(r.start), out(r.finish),
     r.late == null ? '' : r.late, out(r.delivery)]
   const save = (secs, name) => downloadCsv(`${name}-due-dates-${isoDate(today)}.csv`,
@@ -3166,8 +3158,9 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
               <table className="report duedates">
                 <thead>
                   <tr>
-                    <th>Unit</th><th>Model</th>
-                    {showPdesc && <th>Part description</th>}
+                    <th>Unit</th>
+                    {showModel && <th>Model</th>}
+                    <th>Description</th>
                     <th>Planned start</th>
                     <th title="The day this station has to be finished to keep the delivery date">Due</th>
                     <th>Projected start</th><th>Projected finish</th>
@@ -3180,10 +3173,8 @@ function ForemenView({ stages, jobs, partsById, cal, today }) {
                     <tr key={`${r.jobId}-${r.key}`}
                       className={`${r.state === 'active' ? 'onnow' : ''}${r.overdue ? ' overdue' : ''}`}>
                       <td className="strong">{r.unit}</td>
-                      <td className={r.model ? '' : 'muted'} title={r.desc}>{r.model || '—'}</td>
-                      {showPdesc && (
-                        <td className={`pdesc${r.pdesc ? '' : ' muted'}`}>{r.pdesc || '—'}</td>
-                      )}
+                      {showModel && <td className={r.model ? '' : 'muted'}>{r.model || '—'}</td>}
+                      <td className={`unitdesc${r.desc ? '' : ' muted'}`}>{r.desc || '—'}</td>
                       <td className={`n${r.overdue === 'start' ? ' blown' : ''}`}
                         title={r.overdue === 'start' ? `Overdue — ${overdueText('start', r.behind)}` : undefined}>
                         {date(r.plan && r.plan.start)}</td>
@@ -4233,12 +4224,14 @@ function Style() {
     table.duedates td { padding: 7px 12px; }
     table.duedates td.due { font-weight: 700; }
     /* Every report cell is nowrap, and this table scrolls sideways. Left that way
-       a long part description would widen it and push the dates -- the reason
+       a long description would widen it and push the dates -- the reason
        the page exists -- out of view, so this one cell wraps: a long description
        costs height, never width. The max-width is a preference, not a cap; a
        table hands out spare width as it likes, so on a wide screen the column
        may take more, and on a narrow one it gives way to the dates. */
-    table.duedates td.pdesc { white-space: normal; max-width: 260px; min-width: 140px; }
+    /* Not .desc: that is the board's row-label style, small and grey, and it
+       would leak into this cell. */
+    table.duedates td.unitdesc { white-space: normal; max-width: 260px; min-width: 140px; }
     table.duedates tr.onnow td { background: #FBF7EF; }
     /* Overdue outranks on-now: a station running inside its planned window is
        news, one that has run past it is work. Same ring as the board's bars. */
